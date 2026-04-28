@@ -108,6 +108,21 @@ button.danger {
   margin-bottom: 12px;
 }
 
+.check-row {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  align-items: center;
+  gap: 8px;
+  color: #f8fbff;
+  font-size: 13px;
+}
+
+.check-row input {
+  width: 18px;
+  min-height: 18px;
+  margin: 0;
+}
+
 .balance-box {
   display: grid;
   gap: 8px;

@@ -97,7 +97,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json(config.to_dict())
         elif parsed.path == "/api/live/start":
             config = load_live_config()
-            strategy = load_live_strategy_config(config.seed_capital)
+            seed_capital, seed_error = resolve_seed_capital(config)
+            if seed_capital <= 0:
+                self._json({"running": False, "message": seed_error or "잔고 최대 시드로 사용할 현금이 없습니다."})
+                return
+            strategy = load_live_strategy_config(seed_capital)
             self._json(start_live_trader(strategy))
         elif parsed.path == "/api/live/stop":
             self._json(stop_live_trader())
@@ -230,13 +234,33 @@ def load_kis_balance() -> dict:
     parsed = parse_balance_response(response)
     ok = parsed["rt_cd"] in {"0", ""}
     parsed.pop("raw", None)
+    max_seed_capital = balance_max_seed(parsed)
     return {
         **parsed,
         "ok": ok,
+        "max_seed_capital": max_seed_capital,
         "account_no_masked": _mask_account(config.account_no),
         "product_code": config.product_code,
         "fetched_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
     }
+
+
+def resolve_seed_capital(config: LiveConfig) -> tuple[float, str]:
+    if config.seed_source != "balance_max":
+        return config.seed_capital, ""
+    balance = load_kis_balance()
+    if not balance.get("ok"):
+        return 0.0, str(balance.get("message") or "잔고 조회에 실패했습니다.")
+    seed = balance_max_seed(balance)
+    if seed <= 0:
+        return 0.0, "잔고 최대 시드로 사용할 현금이 없습니다."
+    return seed, ""
+
+
+def balance_max_seed(balance: dict) -> float:
+    cash = _to_number(balance.get("cash", 0))
+    withdrawable_cash = _to_number(balance.get("withdrawable_cash", 0))
+    return float(max(cash, withdrawable_cash))
 
 
 def load_live_strategy_config(seed_capital: float | None = None) -> StockScannerConfig:

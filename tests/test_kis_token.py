@@ -102,6 +102,12 @@ class KisTokenTests(unittest.TestCase):
         self.assertEqual(parsed["total_evaluation"], 1_416_000)
         self.assertEqual(parsed["holdings"][0]["symbol"], "005930")
 
+    def test_balance_max_seed_uses_larger_cash_value(self):
+        from semibot_web.server import balance_max_seed
+
+        self.assertEqual(balance_max_seed({"cash": 1_200_000, "withdrawable_cash": 900_000}), 1_200_000)
+        self.assertEqual(balance_max_seed({"cash": 800_000, "withdrawable_cash": 1_100_000}), 1_100_000)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -225,6 +225,8 @@ async function loadLiveConfig() {
   $("accountNo").value = config.account_no || "";
   $("productCode").value = config.product_code || "01";
   $("seedCapital").value = Math.round(Number(config.seed_capital || 1000000));
+  $("seedBalanceMax").checked = config.seed_source === "balance_max";
+  updateSeedInputState();
 }
 
 function liveConfigPayload() {
@@ -237,6 +239,7 @@ function liveConfigPayload() {
     account_no: $("accountNo").value.trim(),
     product_code: $("productCode").value.trim() || "01",
     seed_capital: seed,
+    seed_source: $("seedBalanceMax").checked ? "balance_max" : "manual",
     auto_select: true,
   };
 }
@@ -247,7 +250,8 @@ async function saveLiveConfig() {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(liveConfigPayload()),
   });
-  $("liveStatus").textContent = `설정 저장됨: ${config.mode}, 시드 ${money(config.seed_capital)}, 시장 자동선별`;
+  const seedText = config.seed_source === "balance_max" ? `잔고 최대 사용 (${money(config.seed_capital)} 예비값)` : money(config.seed_capital);
+  $("liveStatus").textContent = `설정 저장됨: ${config.mode}, 시드 ${seedText}, 시장 자동선별`;
 }
 
 async function loadLiveStatus() {
@@ -257,7 +261,7 @@ async function loadLiveStatus() {
   const pieces = [
     status.running ? "실행 중" : "대기 중",
     `모드: ${status.mode || $("liveMode").value || "paper"}`,
-    `시드: ${money(status.seed_capital || $("seedCapital").value || 0)}`,
+    `시드: ${status.seed_source === "balance_max" ? "잔고 최대 " : ""}${money(status.seed_capital || $("seedCapital").value || 0)}`,
     `선별: ${status.selector_message || status.selector || "-"}`,
     `추적: ${activeSymbols.length}종목`,
     `주문기록: ${Number(status.orders || 0).toLocaleString("ko-KR")}건`,
@@ -276,8 +280,12 @@ async function startLive() {
     const ok = confirm("실전 주문 모드입니다. 조건 충족 시 실제 매수/매도 주문이 전송됩니다. 시작할까요?");
     if (!ok) return;
   }
-  await getJSON("/api/live/start", { method: "POST" });
-  await loadLiveStatus();
+  const status = await getJSON("/api/live/start", { method: "POST" });
+  if (!status.running && status.message) {
+    $("liveStatus").textContent = status.message;
+  } else {
+    await loadLiveStatus();
+  }
   await loadReports();
 }
 
@@ -301,9 +309,18 @@ function renderBalance(data) {
   $("balanceCash").textContent = money(data.cash);
   $("balanceWithdrawable").textContent = money(data.withdrawable_cash);
   $("balanceTotal").textContent = money(data.total_evaluation);
+  if ($("seedBalanceMax").checked && Number(data.max_seed_capital || 0) > 0) {
+    $("seedCapital").value = Math.round(Number(data.max_seed_capital));
+  }
   const pnl = Number(data.profit_loss || 0);
   $("balancePnl").textContent = signedMoney(pnl);
   $("balancePnl").className = pnl >= 0 ? "good" : "bad";
+}
+
+function updateSeedInputState() {
+  const usingBalance = $("seedBalanceMax").checked;
+  $("seedCapital").disabled = usingBalance;
+  $("seedCapital").title = usingBalance ? "자동매매 시작 시 최신 잔고를 조회해 시드로 사용합니다." : "";
 }
 
 window.addEventListener("resize", () => {
@@ -329,6 +346,15 @@ $("refreshBalanceButton").addEventListener("click", () => {
     $("balanceStatus").textContent = "잔고 조회 실패";
     alert(error.message);
   });
+});
+$("seedBalanceMax").addEventListener("change", () => {
+  updateSeedInputState();
+  if ($("seedBalanceMax").checked) {
+    refreshBalance().catch((error) => {
+      $("balanceStatus").textContent = "잔고 조회 실패";
+      console.error(error);
+    });
+  }
 });
 
 Promise.all([loadReports(), loadKeyStatus(), loadLiveConfig(), loadLiveStatus()]).catch((error) => {
