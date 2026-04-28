@@ -152,7 +152,7 @@ http://127.0.0.1:8000
 - 한국투자증권 App Key / App Secret / Access Token 입력 및 로컬 저장
 - 자동매매 모드, 계좌 설정과 시작/중지
 
-한국투자증권 키는 `config/kis.local.json`에 저장됩니다. 이 파일은 `.gitignore`에 포함되어 Git에 올라가지 않습니다. 웹 API는 키 조회 시 App Key만 마스킹해서 보여주고, App Secret은 다시 반환하지 않습니다.
+한국투자증권 키는 `config/kis.local.json`에 저장됩니다. 이 파일은 `.gitignore`에 포함되어 Git에 올라가지 않습니다. 웹 API는 키 조회 시 App Key만 마스킹해서 보여주고, App Secret은 다시 반환하지 않습니다. Access Token은 없거나 만료가 임박하면 자동으로 재발급하고 로컬 파일에 다시 저장합니다.
 
 ## 실전 자동매매
 

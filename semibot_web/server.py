@@ -61,6 +61,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             app_key = str(payload.get("app_key", "")).strip()
             app_secret = str(payload.get("app_secret", "")).strip()
             access_token = str(payload.get("access_token", "")).strip()
+            access_token_expires_at = str(payload.get("access_token_expires_at", "")).strip()
             base_url = str(payload.get("base_url", "https://openapi.koreainvestment.com:9443")).strip()
             if not app_key or not app_secret:
                 self._json({"error": "app_key and app_secret are required"}, HTTPStatus.BAD_REQUEST)
@@ -72,6 +73,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "app_key": app_key,
                         "app_secret": app_secret,
                         "access_token": access_token,
+                        "access_token_expires_at": access_token_expires_at,
                         "base_url": base_url,
                     },
                     ensure_ascii=False,
@@ -205,6 +207,7 @@ def load_kis_key_status() -> dict:
     return {
         "configured": bool(data.get("app_key") and data.get("app_secret")),
         "token_configured": bool(data.get("access_token")),
+        "token_expires_at": data.get("access_token_expires_at", ""),
         "app_key_masked": _mask(str(data.get("app_key", ""))),
         "base_url": data.get("base_url", "https://openapi.koreainvestment.com:9443"),
     }

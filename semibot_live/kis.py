@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
@@ -15,6 +16,7 @@ class KisCredentials:
     app_secret: str
     base_url: str = "https://openapi.koreainvestment.com:9443"
     access_token: str = ""
+    access_token_expires_at: str = ""
 
     @classmethod
     def from_file(cls, path: Path) -> "KisCredentials":
@@ -24,17 +26,23 @@ class KisCredentials:
             app_secret=data.get("app_secret", ""),
             base_url=data.get("base_url", "https://openapi.koreainvestment.com:9443"),
             access_token=data.get("access_token", ""),
+            access_token_expires_at=data.get("access_token_expires_at", ""),
         )
 
 
 class KisClient:
-    def __init__(self, credentials: KisCredentials):
+    def __init__(self, credentials: KisCredentials, credentials_path: Path | None = None):
         self.credentials = credentials
+        self.credentials_path = credentials_path
         self.access_token = credentials.access_token
+        self.access_token_expires_at = credentials.access_token_expires_at
 
     def ensure_token(self) -> str:
-        if self.access_token:
+        if self.access_token and not self._token_expiring_soon():
             return self.access_token
+        return self.refresh_token()
+
+    def refresh_token(self) -> str:
         body = {
             "grant_type": "client_credentials",
             "appkey": self.credentials.app_key,
@@ -42,6 +50,8 @@ class KisClient:
         }
         data = self._request("POST", "/oauth2/tokenP", body=body, auth=False)
         self.access_token = data["access_token"]
+        self.access_token_expires_at = _token_expiry(data)
+        self._save_token()
         return self.access_token
 
     def hashkey(self, body: dict[str, Any]) -> str:
@@ -187,13 +197,56 @@ class KisClient:
             headers["tr_id"] = tr_id
         if hash_body and body is not None:
             headers["hashkey"] = self.hashkey(body)
+        return self._send_request(url, payload, headers, method, retry_auth=auth)
+
+    def _send_request(
+        self,
+        url: str,
+        payload: bytes | None,
+        headers: dict[str, str],
+        method: str,
+        *,
+        retry_auth: bool,
+        retried: bool = False,
+    ) -> dict[str, Any]:
         request = Request(url, data=payload, headers=headers, method=method)
         try:
             with urlopen(request, timeout=15) as response:
-                return json.loads(response.read().decode("utf-8"))
+                data = json.loads(response.read().decode("utf-8"))
+                if retry_auth and not retried and _looks_like_token_error(data):
+                    headers["authorization"] = f"Bearer {self.refresh_token()}"
+                    return self._send_request(url, payload, headers, method, retry_auth=True, retried=True)
+                return data
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            if retry_auth and not retried and exc.code in {401, 403}:
+                headers["authorization"] = f"Bearer {self.refresh_token()}"
+                return self._send_request(url, payload, headers, method, retry_auth=True, retried=True)
             return {"rt_cd": "-1", "msg_cd": f"HTTP_{exc.code}", "msg1": detail}
+
+    def _token_expiring_soon(self) -> bool:
+        expires_at = _parse_token_expiry(self.access_token_expires_at)
+        if expires_at is None:
+            return False
+        return datetime.now(timezone.utc) >= expires_at - timedelta(minutes=10)
+
+    def _save_token(self) -> None:
+        if not self.credentials_path:
+            return
+        self.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+        data: dict[str, Any] = {}
+        if self.credentials_path.exists():
+            data = json.loads(self.credentials_path.read_text(encoding="utf-8"))
+        data.update(
+            {
+                "app_key": self.credentials.app_key,
+                "app_secret": self.credentials.app_secret,
+                "base_url": self.credentials.base_url,
+                "access_token": self.access_token,
+                "access_token_expires_at": self.access_token_expires_at,
+            }
+        )
+        self.credentials_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def parse_price_response(data: dict[str, Any]) -> dict[str, float]:
@@ -225,6 +278,47 @@ def parse_rank_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 def rank_row_symbol(row: dict[str, Any]) -> str:
     return str(row.get("stck_shrn_iscd") or row.get("mksc_shrn_iscd") or row.get("pdno") or "").strip()
+
+
+def _token_expiry(data: dict[str, Any]) -> str:
+    explicit = str(data.get("access_token_token_expired") or data.get("access_token_expires_at") or "").strip()
+    if explicit:
+        parsed = _parse_token_expiry(explicit)
+        if parsed:
+            return parsed.isoformat()
+        return explicit
+    expires_in = _float(data.get("expires_in"))
+    if expires_in <= 0:
+        expires_in = 24 * 60 * 60
+    return (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+
+
+def _parse_token_expiry(value: str) -> datetime | None:
+    value = str(value or "").strip()
+    if not value:
+        return None
+    for candidate in (value, value.replace(" ", "T")):
+        try:
+            parsed = datetime.fromisoformat(candidate)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone(timedelta(hours=9)))
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            pass
+    for fmt in ("%Y%m%d%H%M%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            parsed = datetime.strptime(value, fmt)
+            return parsed.replace(tzinfo=timezone(timedelta(hours=9))).astimezone(timezone.utc)
+        except ValueError:
+            pass
+    return None
+
+
+def _looks_like_token_error(data: dict[str, Any]) -> bool:
+    if str(data.get("rt_cd", "")) in {"0", ""}:
+        return False
+    text = f"{data.get('msg_cd', '')} {data.get('msg1', '')}".lower()
+    return any(token in text for token in ("token", "토큰", "oauth", "authorization", "unauthorized", "인증"))
 
 
 def _float(value: object) -> float:

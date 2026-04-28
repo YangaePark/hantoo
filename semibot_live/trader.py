@@ -112,7 +112,7 @@ class LiveTrader:
         with self.lock:
             self.status.update({"running": True, "message": "실행 중"})
         try:
-            client = KisClient(KisCredentials.from_file(KIS_KEYS_PATH))
+            client = KisClient(KisCredentials.from_file(KIS_KEYS_PATH), credentials_path=KIS_KEYS_PATH)
             self.active_symbols = self._initial_symbols(client)
             while self.running:
                 now = datetime.now()
