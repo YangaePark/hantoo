@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import mimetypes
+import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,9 +22,10 @@ from semibot_live.trader import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = Path(os.environ.get("SEMIBOT_STATE_ROOT", ROOT)).resolve()
 WEB_ROOT = ROOT / "semibot_web" / "static"
-REPORTS_ROOT = ROOT / "reports"
-KIS_KEYS_PATH = ROOT / "config" / "kis.local.json"
+REPORTS_ROOT = STATE_ROOT / "reports"
+KIS_KEYS_PATH = STATE_ROOT / "config" / "kis.local.json"
 SCANNER_CONFIG_PATH = ROOT / "config" / "volatile_stock_scalp.json"
 
 

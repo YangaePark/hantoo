@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -16,9 +17,10 @@ from .kis import KisClient, KisCredentials, parse_price_response, parse_rank_row
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LIVE_CONFIG_PATH = ROOT / "config" / "live.local.json"
-KIS_KEYS_PATH = ROOT / "config" / "kis.local.json"
-LIVE_REPORT_DIR = ROOT / "reports" / "live_trading"
+STATE_ROOT = Path(os.environ.get("SEMIBOT_STATE_ROOT", ROOT)).resolve()
+LIVE_CONFIG_PATH = STATE_ROOT / "config" / "live.local.json"
+KIS_KEYS_PATH = STATE_ROOT / "config" / "kis.local.json"
+LIVE_REPORT_DIR = STATE_ROOT / "reports" / "live_trading"
 
 
 @dataclass

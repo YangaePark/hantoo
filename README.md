@@ -193,6 +193,45 @@ PY
 
 ## 배포
 
+### Synology Container Manager
+
+시놀로지에서는 GitHub 저장소 주소를 그대로 사용하는 Container Manager 프로젝트 배포를 권장합니다.
+
+1. DSM 패키지 센터에서 `Container Manager`를 설치합니다.
+2. File Station에서 `/volume1/docker/hantoo/state` 폴더를 만듭니다.
+3. Container Manager > Project > Create를 엽니다.
+4. Project name은 `hantoo`, Path는 `/volume1/docker/hantoo`로 둡니다.
+5. Source는 `Create docker-compose.yml`을 선택하고 아래 내용을 붙여넣습니다.
+
+```yaml
+services:
+  hantoo:
+    container_name: hantoo-trader
+    build:
+      context: https://github.com/YangaePark/hantoo.git#main
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      TZ: Asia/Seoul
+      SEMIBOT_STATE_ROOT: /app/state
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - /volume1/docker/hantoo/state:/app/state
+```
+
+배포 후 접속 주소:
+
+```text
+http://<NAS-IP>:8000
+```
+
+키와 자동매매 리포트는 `/volume1/docker/hantoo/state` 아래에 저장됩니다. GitHub에서 최신 코드를 다시 빌드해도 이 폴더는 유지됩니다.
+
+자세한 시놀로지 배포 안내는 `deploy/synology/README.md`에 있습니다.
+
+### 일반 서버
+
 가장 단순한 배포 방식은 서버 한 대에서 이 저장소를 실행하고, 내부망 또는 본인 PC에서만 접근하는 것입니다.
 
 ```bash

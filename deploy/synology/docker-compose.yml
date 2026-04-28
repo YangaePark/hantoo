@@ -1,0 +1,14 @@
+services:
+  hantoo:
+    container_name: hantoo-trader
+    build:
+      context: https://github.com/YangaePark/hantoo.git#main
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      TZ: Asia/Seoul
+      SEMIBOT_STATE_ROOT: /app/state
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - /volume1/docker/hantoo/state:/app/state
