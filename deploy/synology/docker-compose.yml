@@ -2,7 +2,7 @@ services:
   hantoo:
     container_name: hantoo-trader
     build:
-      context: https://github.com/YangaePark/hantoo.git#main
+      context: ./app
     restart: unless-stopped
     ports:
       - "8000:8000"

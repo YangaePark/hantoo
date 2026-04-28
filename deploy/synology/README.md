@@ -1,23 +1,33 @@
 # Synology 배포
 
-이 Compose 파일은 GitHub의 `main` 브랜치에서 바로 이미지를 빌드합니다.
+이 배포 방식은 GitHub에서 코드를 한 번 클론한 뒤, Synology Container Manager가 로컬 폴더를 빌드하게 합니다. Docker의 원격 GitHub build context는 private 저장소 인증을 못 받는 경우가 있어 이 방식이 더 안정적입니다.
 
 ## DSM Container Manager
 
 1. DSM 패키지 센터에서 `Container Manager`를 설치합니다.
 2. File Station에서 `/volume1/docker/hantoo/state` 폴더를 만듭니다.
-3. Container Manager > Project > Create를 엽니다.
-4. Project name은 `hantoo`로 입력합니다.
-5. Path는 `/volume1/docker/hantoo`를 선택합니다.
-6. Source는 `Create docker-compose.yml`을 선택합니다.
-7. 아래 내용을 붙여넣고 Deploy를 누릅니다.
+3. SSH로 NAS에 접속해 GitHub 저장소를 받습니다.
+
+```bash
+mkdir -p /volume1/docker/hantoo
+cd /volume1/docker/hantoo
+git clone https://github.com/YangaePark/hantoo.git app
+```
+
+private 저장소라 인증이 필요하면 GitHub Personal Access Token 또는 SSH deploy key를 사용합니다.
+
+4. Container Manager > Project > Create를 엽니다.
+5. Project name은 `hantoo`로 입력합니다.
+6. Path는 `/volume1/docker/hantoo`를 선택합니다.
+7. Source는 `Create docker-compose.yml`을 선택합니다.
+8. 아래 내용을 붙여넣고 Deploy를 누릅니다.
 
 ```yaml
 services:
   hantoo:
     container_name: hantoo-trader
     build:
-      context: https://github.com/YangaePark/hantoo.git#main
+      context: ./app
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -48,6 +58,13 @@ http://<NAS-IP>:8000
 ## 업데이트
 
 GitHub `main`에 새 커밋을 올린 뒤 Container Manager에서 `hantoo` 프로젝트를 중지하고 다시 Build/Deploy 하면 최신 코드가 반영됩니다.
+
+SSH로 업데이트할 때는 아래처럼 먼저 코드를 당겨옵니다.
+
+```bash
+cd /volume1/docker/hantoo/app
+git pull
+```
 
 ## 접근 권장
 
