@@ -12,25 +12,13 @@ from typing import Any
 
 from semibot_backtester.stock_scanner import StockBar, StockScannerConfig, StockScannerBacktester
 
-from .kis import KisClient, KisCredentials, parse_price_response
+from .kis import KisClient, KisCredentials, parse_price_response, parse_rank_rows, rank_row_symbol
 
 
 ROOT = Path(__file__).resolve().parents[1]
 LIVE_CONFIG_PATH = ROOT / "config" / "live.local.json"
 KIS_KEYS_PATH = ROOT / "config" / "kis.local.json"
 LIVE_REPORT_DIR = ROOT / "reports" / "live_trading"
-DEFAULT_WATCHLIST = [
-    "000660",
-    "005930",
-    "042700",
-    "058470",
-    "000990",
-    "039030",
-    "240810",
-    "403870",
-    "095340",
-    "357780",
-]
 
 
 @dataclass
@@ -38,10 +26,13 @@ class LiveConfig:
     mode: str = "paper"
     account_no: str = ""
     product_code: str = "01"
+    auto_select: bool = True
     watchlist: list[str] | None = None
     poll_interval_sec: int = 10
     bar_minutes: int = 5
     max_symbols: int = 20
+    selection_refresh_sec: int = 60
+    candidate_pool_size: int = 60
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LiveConfig":
@@ -54,10 +45,13 @@ class LiveConfig:
             mode=data.get("mode", "paper"),
             account_no=data.get("account_no", ""),
             product_code=data.get("product_code", "01"),
+            auto_select=bool(data.get("auto_select", True)),
             watchlist=watchlist,
             poll_interval_sec=int(data.get("poll_interval_sec", 10)),
             bar_minutes=int(data.get("bar_minutes", 5)),
             max_symbols=int(data.get("max_symbols", 20)),
+            selection_refresh_sec=int(data.get("selection_refresh_sec", 60)),
+            candidate_pool_size=int(data.get("candidate_pool_size", 60)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -65,10 +59,13 @@ class LiveConfig:
             "mode": self.mode,
             "account_no": self.account_no,
             "product_code": self.product_code,
+            "auto_select": self.auto_select,
             "watchlist": self.watchlist or [],
             "poll_interval_sec": self.poll_interval_sec,
             "bar_minutes": self.bar_minutes,
             "max_symbols": self.max_symbols,
+            "selection_refresh_sec": self.selection_refresh_sec,
+            "candidate_pool_size": self.candidate_pool_size,
         }
 
 
@@ -86,9 +83,14 @@ class LiveTrader:
             "last_tick": "",
             "last_error": "",
             "orders": 0,
+            "active_symbols": [],
+            "selector": "자동선별" if config.auto_select else "수동",
+            "selector_message": "",
         }
         self.bars: list[StockBar] = []
         self.seeded_previous_close: set[str] = set()
+        self.active_symbols: list[str] = []
+        self.last_selection_at = 0.0
         self.position: dict[str, Any] | None = None
         self.cash = strategy.initial_capital
         self.day_start_cash = strategy.initial_capital
@@ -109,6 +111,7 @@ class LiveTrader:
             data = dict(self.status)
             data["position"] = self.position or {}
             data["cash"] = round(self.cash, 2)
+            data["active_symbols"] = list(self.active_symbols)
             return data
 
     def _loop(self) -> None:
@@ -116,10 +119,12 @@ class LiveTrader:
             self.status.update({"running": True, "message": "실행 중"})
         try:
             client = KisClient(KisCredentials.from_file(KIS_KEYS_PATH))
-            watchlist = (self.config.watchlist or [])[: self.config.max_symbols]
+            self.active_symbols = self._initial_symbols(client)
             while self.running:
                 now = datetime.now()
-                for symbol in watchlist:
+                if self.config.auto_select and time.time() - self.last_selection_at >= self.config.selection_refresh_sec:
+                    self.active_symbols = self._select_symbols(client)
+                for symbol in self.active_symbols:
                     price_data = client.inquire_price(symbol)
                     parsed = parse_price_response(price_data)
                     if parsed["price"] <= 0:
@@ -127,7 +132,13 @@ class LiveTrader:
                     self._add_tick(symbol, now, parsed)
                 self._evaluate(client, now)
                 with self.lock:
-                    self.status.update({"last_tick": now.isoformat(sep=" ", timespec="seconds"), "message": "실행 중"})
+                    self.status.update(
+                        {
+                            "last_tick": now.isoformat(sep=" ", timespec="seconds"),
+                            "message": "실행 중",
+                            "active_symbols": list(self.active_symbols),
+                        }
+                    )
                 time.sleep(max(1, self.config.poll_interval_sec))
         except Exception as exc:  # noqa: BLE001
             with self.lock:
@@ -136,6 +147,88 @@ class LiveTrader:
             with self.lock:
                 self.status["running"] = False
             self.running = False
+
+    def _initial_symbols(self, client: KisClient) -> list[str]:
+        if self.config.auto_select:
+            return self._select_symbols(client)
+        symbols = _unique_symbols(self.config.watchlist or [])
+        with self.lock:
+            self.status["selector_message"] = f"수동 감시 {len(symbols)}종목"
+        return symbols[: self.config.max_symbols]
+
+    def _select_symbols(self, client: KisClient) -> list[str]:
+        self.last_selection_at = time.time()
+        candidates = self._candidate_symbols(client)
+        ranked: list[tuple[float, str]] = []
+        candidate_items = sorted(candidates.items(), key=lambda item: _source_priority(item[1]), reverse=True)
+        for symbol, row in candidate_items[: self.config.candidate_pool_size]:
+            price_data = client.inquire_price(symbol)
+            parsed = parse_price_response(price_data)
+            if not self._passes_live_candidate(parsed, row):
+                continue
+            score = self._live_candidate_score(parsed, row)
+            ranked.append((score, symbol))
+            time.sleep(0.04)
+        ranked.sort(reverse=True)
+        selected = [symbol for _, symbol in ranked[: self.config.max_symbols]]
+        with self.lock:
+            self.status["selector_message"] = f"자동선별 {len(selected)}종목 / 후보 {len(candidates)}종목"
+            self.status["active_symbols"] = selected
+        return selected
+
+    def _candidate_symbols(self, client: KisClient) -> dict[str, dict[str, Any]]:
+        rows: list[tuple[str, dict[str, Any]]] = []
+        responses = [
+            ("trade_value", client.volume_rank(sort_code="3", min_volume="0")),
+            ("volume_surge", client.volume_rank(sort_code="1", min_volume="0")),
+            ("gap_up", client.fluctuation_rank(min_rate=str(int(self.strategy.gap_min_pct * 100)), max_rate="30", count="80")),
+            ("strength", client.volume_power_rank()),
+        ]
+        for source, response in responses:
+            rows.extend((source, row) for row in parse_rank_rows(response))
+
+        candidates: dict[str, dict[str, Any]] = {}
+        for source, row in rows:
+            symbol = rank_row_symbol(row)
+            if not _valid_stock_symbol(symbol):
+                continue
+            if _excluded_name(str(row.get("hts_kor_isnm", ""))):
+                continue
+            if symbol not in candidates:
+                candidates[symbol] = dict(row)
+                candidates[symbol]["_sources"] = [source]
+                continue
+            candidates[symbol].update({key: value for key, value in row.items() if value not in {"", None}})
+            candidates[symbol].setdefault("_sources", []).append(source)
+        return candidates
+
+    def _passes_live_candidate(self, parsed: dict[str, float], row: dict[str, Any]) -> bool:
+        price = parsed["price"]
+        if price <= 0:
+            return False
+        gap = parsed["prev_rate_pct"] / 100.0
+        if not (self.strategy.gap_min_pct <= gap <= self.strategy.gap_max_pct):
+            return False
+        day_range = ((parsed["high"] - parsed["low"]) / price) if price else 0.0
+        if day_range < self.strategy.min_atr_pct:
+            return False
+        avg_volume = _float(row.get("avrg_vol"))
+        volume_surge = (parsed["volume"] / avg_volume) if avg_volume > 0 else _float(row.get("vol_inrt")) / 100.0
+        sources = set(row.get("_sources", []))
+        if volume_surge < self.strategy.volume_factor and "volume_surge" not in sources:
+            return False
+        trade_value = parsed["value"] or _float(row.get("acml_tr_pbmn"))
+        return trade_value >= 1_000_000_000
+
+    def _live_candidate_score(self, parsed: dict[str, float], row: dict[str, Any]) -> float:
+        price = parsed["price"] or 1.0
+        day_range = max(0.0, (parsed["high"] - parsed["low"]) / price)
+        gap = max(0.0, parsed["prev_rate_pct"] / 100.0)
+        trade_value = max(parsed["value"], _float(row.get("acml_tr_pbmn")), 1.0)
+        avg_volume = _float(row.get("avrg_vol"))
+        volume_surge = (parsed["volume"] / avg_volume) if avg_volume > 0 else max(0.0, _float(row.get("vol_inrt")) / 100.0)
+        strength = max(0.0, _float(row.get("tday_rltv")) / 100.0)
+        return (math.log10(trade_value) * 1.5) + (gap * 100.0) + (day_range * 120.0) + min(volume_surge, 8.0) + strength
 
     def _add_tick(self, symbol: str, now: datetime, parsed: dict[str, float]) -> None:
         self._seed_previous_close(symbol, now, parsed)
@@ -237,7 +330,7 @@ _TRADER: LiveTrader | None = None
 
 def load_live_config() -> LiveConfig:
     if not LIVE_CONFIG_PATH.exists():
-        return LiveConfig(watchlist=DEFAULT_WATCHLIST)
+        return LiveConfig(auto_select=True, watchlist=[])
     return LiveConfig.from_dict(json.loads(LIVE_CONFIG_PATH.read_text(encoding="utf-8")))
 
 
@@ -262,13 +355,13 @@ def stop_live_trader() -> dict[str, Any]:
     if _TRADER:
         _TRADER.stop()
         return _TRADER.snapshot()
-    return {"running": False, "message": "대기 중"}
+    return _idle_status()
 
 
 def live_status() -> dict[str, Any]:
     if _TRADER:
         return _TRADER.snapshot()
-    return {"running": False, "message": "대기 중"}
+    return _idle_status()
 
 
 def ensure_live_report() -> None:
@@ -342,3 +435,48 @@ def _write_live_equity(rows: list[dict[str, Any]]) -> None:
 
 def _write_live_metrics(metrics: dict[str, Any]) -> None:
     (LIVE_REPORT_DIR / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _idle_status() -> dict[str, Any]:
+    config = load_live_config()
+    return {
+        "running": False,
+        "message": "대기 중",
+        "mode": config.mode,
+        "selector": "자동선별" if config.auto_select else "수동",
+        "selector_message": "시장 자동선별 대기" if config.auto_select else f"수동 감시 {len(config.watchlist or [])}종목",
+        "active_symbols": [],
+        "orders": 0,
+    }
+
+
+def _unique_symbols(symbols: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        clean = str(symbol).strip()
+        if clean and clean not in seen:
+            result.append(clean)
+            seen.add(clean)
+    return result
+
+
+def _valid_stock_symbol(symbol: str) -> bool:
+    return len(symbol) == 6 and symbol.isdigit()
+
+
+def _excluded_name(name: str) -> bool:
+    upper = name.upper()
+    return any(token in upper for token in ("ETF", "ETN", "스팩", "SPAC"))
+
+
+def _source_priority(row: dict[str, Any]) -> int:
+    weights = {"trade_value": 4, "volume_surge": 4, "gap_up": 3, "strength": 2}
+    return sum(weights.get(source, 0) for source in set(row.get("_sources", [])))
+
+
+def _float(value: object) -> float:
+    try:
+        return float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return 0.0

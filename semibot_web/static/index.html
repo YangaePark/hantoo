@@ -38,7 +38,11 @@
         </label>
         <input id="accountNo" placeholder="계좌번호 앞 8자리" autocomplete="off" />
         <input id="productCode" placeholder="상품코드 예: 01" autocomplete="off" />
-        <textarea id="watchlist" rows="5" placeholder="감시종목 코드, 쉼표 또는 줄바꿈"></textarea>
+        <label class="check-row">
+          <input id="autoSelect" type="checkbox" />
+          <span>시장 자동선별</span>
+        </label>
+        <textarea id="watchlist" rows="5" placeholder="수동 후보 종목 코드, 쉼표 또는 줄바꿈"></textarea>
         <button id="saveLiveConfigButton">설정 저장</button>
         <button id="startLiveButton" class="primary">자동매매 시작</button>
         <button id="stopLiveButton" class="danger">중지</button>

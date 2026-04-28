@@ -218,6 +218,7 @@ async function loadLiveConfig() {
   $("liveMode").value = config.mode || "paper";
   $("accountNo").value = config.account_no || "";
   $("productCode").value = config.product_code || "01";
+  $("autoSelect").checked = config.auto_select !== false;
   $("watchlist").value = (config.watchlist || []).join("\n");
 }
 
@@ -231,6 +232,7 @@ function liveConfigPayload() {
     mode: $("liveMode").value,
     account_no: $("accountNo").value.trim(),
     product_code: $("productCode").value.trim() || "01",
+    auto_select: $("autoSelect").checked,
     watchlist,
   };
 }
@@ -241,15 +243,19 @@ async function saveLiveConfig() {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(liveConfigPayload()),
   });
-  $("liveStatus").textContent = `설정 저장됨: ${config.mode}, ${config.watchlist.length}종목`;
+  const target = config.auto_select ? "시장 자동선별" : `${config.watchlist.length}종목 수동`;
+  $("liveStatus").textContent = `설정 저장됨: ${config.mode}, ${target}`;
 }
 
 async function loadLiveStatus() {
   const status = await getJSON("/api/live/status");
   const position = status.position || {};
+  const activeSymbols = status.active_symbols || [];
   const pieces = [
     status.running ? "실행 중" : "대기 중",
     `모드: ${status.mode || $("liveMode").value || "paper"}`,
+    `선별: ${status.selector_message || status.selector || "-"}`,
+    `추적: ${activeSymbols.length}종목`,
     `주문기록: ${Number(status.orders || 0).toLocaleString("ko-KR")}건`,
   ];
   if (status.last_tick) pieces.push(`최근: ${status.last_tick}`);

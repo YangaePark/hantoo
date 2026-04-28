@@ -59,6 +59,67 @@ class KisClient:
             tr_id="FHKST01010100",
         )
 
+    def volume_rank(self, *, sort_code: str = "3", min_volume: str = "0") -> dict[str, Any]:
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_COND_SCR_DIV_CODE": "20171",
+            "FID_INPUT_ISCD": "0000",
+            "FID_DIV_CLS_CODE": "1",
+            "FID_BLNG_CLS_CODE": sort_code,
+            "FID_TRGT_CLS_CODE": "111111111",
+            "FID_TRGT_EXLS_CLS_CODE": "1111111111",
+            "FID_INPUT_PRICE_1": "0",
+            "FID_INPUT_PRICE_2": "1000000",
+            "FID_VOL_CNT": min_volume,
+            "FID_INPUT_DATE_1": "",
+        }
+        return self._request(
+            "GET",
+            f"/uapi/domestic-stock/v1/quotations/volume-rank?{urlencode(params)}",
+            tr_id="FHPST01710000",
+        )
+
+    def fluctuation_rank(self, *, min_rate: str = "2", max_rate: str = "30", count: str = "50") -> dict[str, Any]:
+        params = {
+            "fid_rsfl_rate2": max_rate,
+            "fid_cond_mrkt_div_code": "J",
+            "fid_cond_scr_div_code": "20170",
+            "fid_input_iscd": "0000",
+            "fid_rank_sort_cls_code": "0000",
+            "fid_input_cnt_1": count,
+            "fid_prc_cls_code": "0",
+            "fid_input_price_1": "0",
+            "fid_input_price_2": "1000000",
+            "fid_vol_cnt": "0",
+            "fid_trgt_cls_code": "0",
+            "fid_trgt_exls_cls_code": "1111111111",
+            "fid_div_cls_code": "0",
+            "fid_rsfl_rate1": min_rate,
+        }
+        return self._request(
+            "GET",
+            f"/uapi/domestic-stock/v1/ranking/fluctuation?{urlencode(params)}",
+            tr_id="FHPST01700000",
+        )
+
+    def volume_power_rank(self) -> dict[str, Any]:
+        params = {
+            "fid_trgt_exls_cls_code": "0",
+            "fid_cond_mrkt_div_code": "J",
+            "fid_cond_scr_div_code": "20168",
+            "fid_input_iscd": "0000",
+            "fid_div_cls_code": "1",
+            "fid_input_price_1": "0",
+            "fid_input_price_2": "1000000",
+            "fid_vol_cnt": "0",
+            "fid_trgt_cls_code": "0",
+        }
+        return self._request(
+            "GET",
+            f"/uapi/domestic-stock/v1/ranking/volume-power?{urlencode(params)}",
+            tr_id="FHPST01680000",
+        )
+
     def inquire_balance(self, account_no: str, product_code: str = "01") -> dict[str, Any]:
         params = {
             "CANO": account_no,
@@ -153,6 +214,17 @@ def parse_price_response(data: dict[str, Any]) -> dict[str, float]:
         "value": value,
         "prev_rate_pct": prev_rate,
     }
+
+
+def parse_rank_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+    output = data.get("output") or data.get("output1") or []
+    if isinstance(output, dict):
+        output = [output]
+    return [row for row in output if isinstance(row, dict)]
+
+
+def rank_row_symbol(row: dict[str, Any]) -> str:
+    return str(row.get("stck_shrn_iscd") or row.get("mksc_shrn_iscd") or row.get("pdno") or "").strip()
 
 
 def _float(value: object) -> float:
