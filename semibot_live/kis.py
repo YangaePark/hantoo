@@ -130,7 +130,7 @@ class KisClient:
             tr_id="FHPST01680000",
         )
 
-    def inquire_balance(self, account_no: str, product_code: str = "01") -> dict[str, Any]:
+    def inquire_balance(self, account_no: str, product_code: str = "01", *, live: bool = True) -> dict[str, Any]:
         params = {
             "CANO": account_no,
             "ACNT_PRDT_CD": product_code,
@@ -147,7 +147,7 @@ class KisClient:
         return self._request(
             "GET",
             f"/uapi/domestic-stock/v1/trading/inquire-balance?{urlencode(params)}",
-            tr_id="TTTC8434R",
+            tr_id="TTTC8434R" if live else "VTTC8434R",
         )
 
     def order_cash(
@@ -276,6 +276,47 @@ def parse_rank_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
     return [row for row in output if isinstance(row, dict)]
 
 
+def parse_balance_response(data: dict[str, Any]) -> dict[str, Any]:
+    summary = _first_dict(data.get("output2"))
+    holdings = data.get("output1") or []
+    if isinstance(holdings, dict):
+        holdings = [holdings]
+
+    parsed_holdings = []
+    for row in holdings:
+        if not isinstance(row, dict):
+            continue
+        quantity = _float(row.get("hldg_qty") or row.get("ord_psbl_qty"))
+        if quantity <= 0:
+            continue
+        parsed_holdings.append(
+            {
+                "symbol": str(row.get("pdno") or "").strip(),
+                "name": str(row.get("prdt_name") or row.get("prdt_abrv_name") or "").strip(),
+                "quantity": quantity,
+                "average_price": _float(row.get("pchs_avg_pric")),
+                "current_price": _float(row.get("prpr")),
+                "evaluation": _float(row.get("evlu_amt")),
+                "profit_loss": _float(row.get("evlu_pfls_amt")),
+                "profit_loss_rate": _float(row.get("evlu_pfls_rt")),
+            }
+        )
+
+    return {
+        "rt_cd": str(data.get("rt_cd", "")),
+        "msg_cd": data.get("msg_cd", ""),
+        "message": data.get("msg1", ""),
+        "cash": _first_float(summary, ("dnca_tot_amt", "prvs_rcdl_excc_amt", "nxdy_excc_amt", "d2_auto_rdpt_amt")),
+        "withdrawable_cash": _first_float(summary, ("prvs_rcdl_excc_amt", "nxdy_excc_amt", "dnca_tot_amt")),
+        "total_evaluation": _first_float(summary, ("tot_evlu_amt", "nass_amt", "asst_icdc_amt")),
+        "stock_evaluation": _first_float(summary, ("scts_evlu_amt", "evlu_amt_smtl_amt")),
+        "profit_loss": _first_float(summary, ("evlu_pfls_smtl_amt", "asst_icdc_amt")),
+        "profit_loss_rate": _first_float(summary, ("evlu_pfls_rt", "asst_icdc_erng_rt")),
+        "holdings": parsed_holdings,
+        "raw": data,
+    }
+
+
 def rank_row_symbol(row: dict[str, Any]) -> str:
     return str(row.get("stck_shrn_iscd") or row.get("mksc_shrn_iscd") or row.get("pdno") or "").strip()
 
@@ -326,3 +367,19 @@ def _float(value: object) -> float:
         return float(str(value).replace(",", ""))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _first_dict(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return next((item for item in value if isinstance(item, dict)), {})
+    return {}
+
+
+def _first_float(data: dict[str, Any], keys: tuple[str, ...]) -> float:
+    for key in keys:
+        number = _float(data.get(key))
+        if number != 0:
+            return number
+    return 0.0

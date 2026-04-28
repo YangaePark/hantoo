@@ -4,12 +4,15 @@ import csv
 import json
 import mimetypes
 import os
+from dataclasses import replace
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from semibot_backtester.stock_scanner import StockScannerConfig
+from semibot_live.kis import KisClient, KisCredentials, parse_balance_response
 from semibot_live.trader import (
     ensure_live_report,
     LiveConfig,
@@ -47,6 +50,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json(load_report(name))
         elif parsed.path == "/api/kis/keys":
             self._json(load_kis_key_status())
+        elif parsed.path == "/api/kis/balance":
+            self._json(load_kis_balance())
         elif parsed.path == "/api/live/config":
             self._json(load_live_config().to_dict())
         elif parsed.path == "/api/live/status":
@@ -91,7 +96,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             save_live_config(config)
             self._json(config.to_dict())
         elif parsed.path == "/api/live/start":
-            strategy = load_live_strategy_config()
+            config = load_live_config()
+            strategy = load_live_strategy_config(config.seed_capital)
             self._json(start_live_trader(strategy))
         elif parsed.path == "/api/live/stop":
             self._json(stop_live_trader())
@@ -213,10 +219,33 @@ def load_kis_key_status() -> dict:
     }
 
 
-def load_live_strategy_config() -> StockScannerConfig:
-    if not SCANNER_CONFIG_PATH.exists():
-        return StockScannerConfig()
-    return StockScannerConfig.from_dict(_read_json_file(SCANNER_CONFIG_PATH))
+def load_kis_balance() -> dict:
+    if not KIS_KEYS_PATH.exists():
+        return {"ok": False, "message": "KIS 키가 저장되어 있지 않습니다."}
+    config = load_live_config()
+    if not config.account_no:
+        return {"ok": False, "message": "계좌번호를 저장한 뒤 조회하세요."}
+    client = KisClient(KisCredentials.from_file(KIS_KEYS_PATH), credentials_path=KIS_KEYS_PATH)
+    response = client.inquire_balance(config.account_no, config.product_code, live=True)
+    parsed = parse_balance_response(response)
+    ok = parsed["rt_cd"] in {"0", ""}
+    parsed.pop("raw", None)
+    return {
+        **parsed,
+        "ok": ok,
+        "account_no_masked": _mask_account(config.account_no),
+        "product_code": config.product_code,
+        "fetched_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
+    }
+
+
+def load_live_strategy_config(seed_capital: float | None = None) -> StockScannerConfig:
+    config = StockScannerConfig()
+    if SCANNER_CONFIG_PATH.exists():
+        config = StockScannerConfig.from_dict(_read_json_file(SCANNER_CONFIG_PATH))
+    if seed_capital and seed_capital > 0:
+        return replace(config, initial_capital=seed_capital)
+    return config
 
 
 def _read_json_file(path: Path) -> dict:
@@ -240,6 +269,13 @@ def _mask(value: str) -> str:
     if len(value) <= 8:
         return "*" * len(value)
     return f"{value[:4]}...{value[-4:]}"
+
+
+def _mask_account(value: str) -> str:
+    value = str(value or "")
+    if len(value) <= 4:
+        return "*" * len(value)
+    return f"{value[:2]}****{value[-2:]}"
 
 
 def _to_number(value: object) -> float:

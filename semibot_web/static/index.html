@@ -38,6 +38,23 @@
         </label>
         <input id="accountNo" placeholder="계좌번호 앞 8자리" autocomplete="off" />
         <input id="productCode" placeholder="상품코드 예: 01" autocomplete="off" />
+        <label class="field">
+          <span>시드</span>
+          <input id="seedCapital" placeholder="예: 1000000" type="number" min="10000" step="10000" inputmode="numeric" />
+        </label>
+        <div class="balance-box">
+          <div class="balance-head">
+            <span>실계좌 잔고</span>
+            <button id="refreshBalanceButton" type="button">잔고 새로고침</button>
+          </div>
+          <p id="balanceStatus">계좌 설정 저장 후 조회</p>
+          <div class="balance-grid">
+            <span>예수금</span><strong id="balanceCash">-</strong>
+            <span>출금가능</span><strong id="balanceWithdrawable">-</strong>
+            <span>총평가</span><strong id="balanceTotal">-</strong>
+            <span>손익</span><strong id="balancePnl">-</strong>
+          </div>
+        </div>
         <button id="saveLiveConfigButton">설정 저장</button>
         <button id="startLiveButton" class="primary">자동매매 시작</button>
         <button id="stopLiveButton" class="danger">중지</button>

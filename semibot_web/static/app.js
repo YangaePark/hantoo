@@ -18,6 +18,12 @@ function money(value) {
   return `${number.toLocaleString("ko-KR", { maximumFractionDigits: 0 })}원`;
 }
 
+function signedMoney(value) {
+  const number = Number(value || 0);
+  const sign = number > 0 ? "+" : "";
+  return `${sign}${money(number)}`;
+}
+
 function pct(value) {
   const number = Number(value || 0);
   const cls = number >= 0 ? "good" : "bad";
@@ -218,13 +224,19 @@ async function loadLiveConfig() {
   $("liveMode").value = config.mode || "paper";
   $("accountNo").value = config.account_no || "";
   $("productCode").value = config.product_code || "01";
+  $("seedCapital").value = Math.round(Number(config.seed_capital || 1000000));
 }
 
 function liveConfigPayload() {
+  const seed = Number($("seedCapital").value || 0);
+  if (!Number.isFinite(seed) || seed <= 0) {
+    throw new Error("시드는 0보다 큰 금액으로 입력하세요.");
+  }
   return {
     mode: $("liveMode").value,
     account_no: $("accountNo").value.trim(),
     product_code: $("productCode").value.trim() || "01",
+    seed_capital: seed,
     auto_select: true,
   };
 }
@@ -235,7 +247,7 @@ async function saveLiveConfig() {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(liveConfigPayload()),
   });
-  $("liveStatus").textContent = `설정 저장됨: ${config.mode}, 시장 자동선별`;
+  $("liveStatus").textContent = `설정 저장됨: ${config.mode}, 시드 ${money(config.seed_capital)}, 시장 자동선별`;
 }
 
 async function loadLiveStatus() {
@@ -245,6 +257,7 @@ async function loadLiveStatus() {
   const pieces = [
     status.running ? "실행 중" : "대기 중",
     `모드: ${status.mode || $("liveMode").value || "paper"}`,
+    `시드: ${money(status.seed_capital || $("seedCapital").value || 0)}`,
     `선별: ${status.selector_message || status.selector || "-"}`,
     `추적: ${activeSymbols.length}종목`,
     `주문기록: ${Number(status.orders || 0).toLocaleString("ko-KR")}건`,
@@ -273,6 +286,26 @@ async function stopLive() {
   await loadLiveStatus();
 }
 
+async function refreshBalance() {
+  $("balanceStatus").textContent = "조회 중...";
+  const data = await getJSON("/api/kis/balance", { cache: "no-store" });
+  renderBalance(data);
+}
+
+function renderBalance(data) {
+  if (!data.ok) {
+    $("balanceStatus").textContent = data.message || "잔고 조회 실패";
+    return;
+  }
+  $("balanceStatus").textContent = `${data.account_no_masked || "-"}-${data.product_code || "01"} / ${data.fetched_at || ""}`;
+  $("balanceCash").textContent = money(data.cash);
+  $("balanceWithdrawable").textContent = money(data.withdrawable_cash);
+  $("balanceTotal").textContent = money(data.total_evaluation);
+  const pnl = Number(data.profit_loss || 0);
+  $("balancePnl").textContent = signedMoney(pnl);
+  $("balancePnl").className = pnl >= 0 ? "good" : "bad";
+}
+
 window.addEventListener("resize", () => {
   if (state.current) renderReport(state.current);
 });
@@ -290,6 +323,12 @@ $("startLiveButton").addEventListener("click", () => {
 });
 $("stopLiveButton").addEventListener("click", () => {
   stopLive().catch((error) => alert(error.message));
+});
+$("refreshBalanceButton").addEventListener("click", () => {
+  refreshBalance().catch((error) => {
+    $("balanceStatus").textContent = "잔고 조회 실패";
+    alert(error.message);
+  });
 });
 
 Promise.all([loadReports(), loadKeyStatus(), loadLiveConfig(), loadLiveStatus()]).catch((error) => {

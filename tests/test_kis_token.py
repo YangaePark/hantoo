@@ -65,6 +65,43 @@ class KisTokenTests(unittest.TestCase):
         self.assertTrue(_looks_like_token_error({"rt_cd": "-1", "msg_cd": "EGW00123", "msg1": "기간이 만료된 token입니다"}))
         self.assertFalse(_looks_like_token_error({"rt_cd": "0", "msg_cd": "", "msg1": "정상"}))
 
+    def test_balance_response_is_parsed(self):
+        from semibot_live.kis import parse_balance_response
+
+        parsed = parse_balance_response(
+            {
+                "rt_cd": "0",
+                "msg1": "정상",
+                "output1": [
+                    {
+                        "pdno": "005930",
+                        "prdt_name": "삼성전자",
+                        "hldg_qty": "3",
+                        "pchs_avg_pric": "70000",
+                        "prpr": "72000",
+                        "evlu_amt": "216000",
+                        "evlu_pfls_amt": "6000",
+                        "evlu_pfls_rt": "2.85",
+                    }
+                ],
+                "output2": [
+                    {
+                        "dnca_tot_amt": "1200000",
+                        "prvs_rcdl_excc_amt": "1100000",
+                        "tot_evlu_amt": "1416000",
+                        "scts_evlu_amt": "216000",
+                        "evlu_pfls_smtl_amt": "6000",
+                        "evlu_pfls_rt": "0.42",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(parsed["cash"], 1_200_000)
+        self.assertEqual(parsed["withdrawable_cash"], 1_100_000)
+        self.assertEqual(parsed["total_evaluation"], 1_416_000)
+        self.assertEqual(parsed["holdings"][0]["symbol"], "005930")
+
 
 if __name__ == "__main__":
     unittest.main()

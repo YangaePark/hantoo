@@ -108,6 +108,58 @@ button.danger {
   margin-bottom: 12px;
 }
 
+.balance-box {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.balance-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.balance-head span {
+  color: #f8fbff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.balance-head button {
+  width: auto;
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.balance-box p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.balance-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 10px;
+  font-size: 12px;
+}
+
+.balance-grid span {
+  color: var(--muted);
+}
+
+.balance-grid strong {
+  color: #f8fbff;
+  text-align: right;
+}
+
 main {
   padding: 28px;
   display: grid;

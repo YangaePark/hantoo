@@ -28,6 +28,7 @@ class LiveConfig:
     mode: str = "paper"
     account_no: str = ""
     product_code: str = "01"
+    seed_capital: float = 1_000_000.0
     auto_select: bool = True
     poll_interval_sec: int = 10
     bar_minutes: int = 5
@@ -41,6 +42,7 @@ class LiveConfig:
             mode=data.get("mode", "paper"),
             account_no=data.get("account_no", ""),
             product_code=data.get("product_code", "01"),
+            seed_capital=_positive_float(data.get("seed_capital"), 1_000_000.0),
             auto_select=True,
             poll_interval_sec=int(data.get("poll_interval_sec", 10)),
             bar_minutes=int(data.get("bar_minutes", 5)),
@@ -54,6 +56,7 @@ class LiveConfig:
             "mode": self.mode,
             "account_no": self.account_no,
             "product_code": self.product_code,
+            "seed_capital": self.seed_capital,
             "auto_select": self.auto_select,
             "poll_interval_sec": self.poll_interval_sec,
             "bar_minutes": self.bar_minutes,
@@ -80,6 +83,7 @@ class LiveTrader:
             "active_symbols": [],
             "selector": "자동선별",
             "selector_message": "",
+            "seed_capital": strategy.initial_capital,
         }
         self.bars: list[StockBar] = []
         self.seeded_previous_close: set[str] = set()
@@ -105,6 +109,7 @@ class LiveTrader:
             data = dict(self.status)
             data["position"] = self.position or {}
             data["cash"] = round(self.cash, 2)
+            data["seed_capital"] = round(self.strategy.initial_capital, 2)
             data["active_symbols"] = list(self.active_symbols)
             return data
 
@@ -436,6 +441,7 @@ def _idle_status() -> dict[str, Any]:
         "selector_message": "시장 자동선별 대기",
         "active_symbols": [],
         "orders": 0,
+        "seed_capital": config.seed_capital,
     }
 
 
@@ -458,3 +464,8 @@ def _float(value: object) -> float:
         return float(str(value).replace(",", ""))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _positive_float(value: object, default: float) -> float:
+    number = _float(value)
+    return number if number > 0 else default

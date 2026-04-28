@@ -9,6 +9,17 @@ class LiveConfigTests(unittest.TestCase):
 
         self.assertTrue(config.auto_select)
         self.assertEqual(config.max_symbols, 20)
+        self.assertEqual(config.seed_capital, 1_000_000.0)
+
+    def test_seed_capital_can_be_configured(self):
+        config = LiveConfig.from_dict({"seed_capital": "1500000"})
+
+        self.assertEqual(config.seed_capital, 1_500_000.0)
+
+    def test_invalid_seed_capital_falls_back_to_default(self):
+        config = LiveConfig.from_dict({"seed_capital": "-10"})
+
+        self.assertEqual(config.seed_capital, 1_000_000.0)
 
     def test_manual_watchlist_payload_is_ignored(self):
         config = LiveConfig.from_dict(
