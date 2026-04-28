@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Semibot Dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <strong>Semibot</strong>
+        <span>System Trading Lab</span>
+      </div>
+      <label class="field">
+        <span>리포트</span>
+        <select id="reportSelect"></select>
+      </label>
+      <button id="refreshButton" class="primary">새로고침</button>
+      <section class="keys">
+        <h2>한국투자 API</h2>
+        <p id="keyStatus">확인 중</p>
+        <input id="appKey" placeholder="App Key" autocomplete="off" />
+        <input id="appSecret" placeholder="App Secret" type="password" autocomplete="off" />
+        <input id="accessToken" placeholder="Access Token (있으면 입력)" type="password" autocomplete="off" />
+        <input id="baseUrl" placeholder="Base URL" />
+        <button id="saveKeysButton">키 저장</button>
+      </section>
+      <section class="keys live-controls">
+        <h2>자동매매</h2>
+        <p id="liveStatus">대기 중</p>
+        <label class="field">
+          <span>모드</span>
+          <select id="liveMode">
+            <option value="paper">모의 실행</option>
+            <option value="live">실전 주문</option>
+          </select>
+        </label>
+        <input id="accountNo" placeholder="계좌번호 앞 8자리" autocomplete="off" />
+        <input id="productCode" placeholder="상품코드 예: 01" autocomplete="off" />
+        <textarea id="watchlist" rows="5" placeholder="감시종목 코드, 쉼표 또는 줄바꿈"></textarea>
+        <button id="saveLiveConfigButton">설정 저장</button>
+        <button id="startLiveButton" class="primary">자동매매 시작</button>
+        <button id="stopLiveButton" class="danger">중지</button>
+      </section>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">현재 선택</p>
+          <h1 id="reportTitle">대시보드</h1>
+        </div>
+        <div id="currentStatus" class="status"></div>
+      </header>
+
+      <section class="metric-grid">
+        <article><span>최종 평가금</span><strong id="metricEquity">-</strong></article>
+        <article><span>수익률</span><strong id="metricReturn">-</strong></article>
+        <article><span>최대낙폭</span><strong id="metricDrawdown">-</strong></article>
+        <article><span>거래횟수</span><strong id="metricTrades">-</strong></article>
+        <article><span>승률</span><strong id="metricWinRate">-</strong></article>
+        <article><span>거래비용</span><strong id="metricCost">-</strong></article>
+      </section>
+
+      <section class="chart-row">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>자산 곡선</h2>
+            <span id="equityRange"></span>
+          </div>
+          <canvas id="equityChart" height="260"></canvas>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <h2>손익 분포</h2>
+            <span>매도 거래 기준</span>
+          </div>
+          <canvas id="pnlChart" height="260"></canvas>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>트레이드 결과</h2>
+          <span id="tradeSummary"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>시간</th>
+                <th>구분</th>
+                <th>종목</th>
+                <th>수량</th>
+                <th>가격</th>
+                <th>실현손익</th>
+                <th>사유</th>
+              </tr>
+            </thead>
+            <tbody id="tradesBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

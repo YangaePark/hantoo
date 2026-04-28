@@ -7,7 +7,7 @@ from pathlib import Path
 from statistics import mean, stdev
 from typing import Optional
 
-from .indicators import rolling_mean, rsi
+from .indicators import average_true_range, rolling_mean, rsi
 from .models import BacktestResult, Bar, Trade
 from .strategy import StrategyConfig
 
@@ -42,22 +42,38 @@ class Backtester:
         self.config = config
 
     def run(self, bars: list[Bar]) -> BacktestResult:
-        min_bars = max(self.config.slow_sma, self.config.volume_sma, self.config.rsi_period) + 2
+        min_bars = (
+            max(
+                self.config.long_sma + self.config.trend_slope_days,
+                self.config.slow_sma,
+                self.config.volume_sma,
+                self.config.rsi_period,
+                self.config.atr_period,
+            )
+            + 2
+        )
         if len(bars) < min_bars:
             raise ValueError(f"Need at least {min_bars} bars, got {len(bars)}")
 
         closes = [bar.close for bar in bars]
+        highs = [bar.high for bar in bars]
+        lows = [bar.low for bar in bars]
         volumes = [float(bar.volume) for bar in bars]
         fast = rolling_mean(closes, self.config.fast_sma)
         slow = rolling_mean(closes, self.config.slow_sma)
+        long = rolling_mean(closes, self.config.long_sma)
         volume_avg = rolling_mean(volumes, self.config.volume_sma)
         rsi_values = rsi(closes, self.config.rsi_period)
+        atr_values = average_true_range(highs, lows, closes, self.config.atr_period)
 
         cash = self.config.initial_capital
         shares = 0
         avg_cost = 0.0
         add_count = 0
         partial_taken = False
+        entry_idx: Optional[int] = None
+        highest_close_since_entry = 0.0
+        cooldown_until_idx = -1
         month_key: Optional[tuple[int, int]] = None
         month_start_equity = self.config.initial_capital
         pause_new_entries = False
@@ -74,8 +90,12 @@ class Backtester:
 
             if idx > 0:
                 signal_idx = idx - 1
-                signal = self._entry_signal(signal_idx, bars, fast, slow, volume_avg, rsi_values)
+                signal = self._entry_signal(signal_idx, bars, fast, slow, long, volume_avg, rsi_values, atr_values)
                 open_equity = cash + shares * bar.open
+                traded_today = False
+
+                if shares > 0:
+                    highest_close_since_entry = max(highest_close_since_entry, bars[signal_idx].close)
 
                 if month_start_equity > 0:
                     month_drawdown = (open_equity / month_start_equity) - 1.0
@@ -83,7 +103,18 @@ class Backtester:
                         pause_new_entries = True
 
                 if shares > 0:
-                    exit_reason = self._exit_reason(signal_idx, bars, fast, avg_cost)
+                    holding_days = 0 if entry_idx is None else idx - entry_idx
+                    exit_reason = self._exit_reason(
+                        signal_idx,
+                        bars,
+                        fast,
+                        slow,
+                        long,
+                        atr_values,
+                        avg_cost,
+                        highest_close_since_entry,
+                        holding_days,
+                    )
                     if exit_reason:
                         cash, avg_cost = self._sell(
                             bar=bar,
@@ -98,6 +129,10 @@ class Backtester:
                         shares = 0
                         add_count = 0
                         partial_taken = False
+                        entry_idx = None
+                        highest_close_since_entry = 0.0
+                        cooldown_until_idx = idx + self.config.cooldown_days_after_exit
+                        traded_today = True
                     elif not partial_taken and bars[signal_idx].close >= avg_cost * (1.0 + self.config.take_profit_pct):
                         shares_to_sell = max(1, math.floor(shares * self.config.partial_sell_ratio))
                         cash, avg_cost = self._sell(
@@ -112,8 +147,11 @@ class Backtester:
                         )
                         shares -= shares_to_sell
                         partial_taken = True
+                        traded_today = True
 
-                if shares > 0 and add_count == 0 and not pause_new_entries:
+                can_enter = not pause_new_entries and idx > cooldown_until_idx and not traded_today
+
+                if shares > 0 and add_count == 0 and can_enter:
                     signal_idx = idx - 1
                     if signal and bars[signal_idx].close >= avg_cost * (1.0 + self.config.add_on_profit_pct):
                         bought, cash, avg_cost = self._buy(
@@ -129,8 +167,9 @@ class Backtester:
                         shares += bought
                         if bought:
                             add_count += 1
+                            traded_today = True
 
-                if shares == 0 and signal and not pause_new_entries:
+                if shares == 0 and signal and can_enter:
                     bought, cash, avg_cost = self._buy(
                         bar=bar,
                         action="BUY",
@@ -142,8 +181,11 @@ class Backtester:
                         reason="trend_entry",
                     )
                     shares += bought
-                    partial_taken = False
-                    add_count = 0
+                    if bought:
+                        partial_taken = False
+                        add_count = 0
+                        entry_idx = idx
+                        highest_close_since_entry = bars[signal_idx].close
 
             equity = cash + shares * bar.close
             peak = max([float(point["equity"]) for point in equity_curve], default=self.config.initial_capital)
@@ -170,17 +212,44 @@ class Backtester:
         bars: list[Bar],
         fast: list[Optional[float]],
         slow: list[Optional[float]],
+        long: list[Optional[float]],
         volume_avg: list[Optional[float]],
         rsi_values: list[Optional[float]],
+        atr_values: list[Optional[float]],
     ) -> bool:
-        if fast[idx] is None or slow[idx] is None or volume_avg[idx] is None or rsi_values[idx] is None:
+        if (
+            fast[idx] is None
+            or slow[idx] is None
+            or long[idx] is None
+            or volume_avg[idx] is None
+            or rsi_values[idx] is None
+            or atr_values[idx] is None
+        ):
+            return False
+        slope_idx = idx - self.config.trend_slope_days
+        if slope_idx < 0 or long[slope_idx] is None:
             return False
 
+        close = bars[idx].close
+        fast_value = float(fast[idx])
+        slow_value = float(slow[idx])
+        long_value = float(long[idx])
+        trend_buffer = self.config.round_trip_cost_rate + self.config.min_edge_rate
+        atr_pct = float(atr_values[idx]) / close
+        price_extension = (close / fast_value) - 1.0
+        trend_edge = ((fast_value / slow_value) - 1.0) + ((close / long_value) - 1.0)
+        required_edge = self.config.round_trip_cost_rate + self.config.min_edge_rate
+
         return (
-            bars[idx].close > float(fast[idx])
-            and float(fast[idx]) > float(slow[idx])
+            close > long_value * (1.0 + trend_buffer)
+            and fast_value > slow_value * (1.0 + trend_buffer)
+            and slow_value >= long_value
+            and long_value > float(long[slope_idx])
             and self.config.rsi_min <= float(rsi_values[idx]) <= self.config.rsi_max
             and bars[idx].volume >= float(volume_avg[idx]) * self.config.volume_factor
+            and atr_pct <= self.config.max_atr_pct
+            and price_extension <= self.config.max_price_extension_pct
+            and trend_edge >= required_edge
         )
 
     def _exit_reason(
@@ -188,13 +257,28 @@ class Backtester:
         idx: int,
         bars: list[Bar],
         fast: list[Optional[float]],
+        slow: list[Optional[float]],
+        long: list[Optional[float]],
+        atr_values: list[Optional[float]],
         avg_cost: float,
+        highest_close_since_entry: float,
+        holding_days: int,
     ) -> Optional[str]:
         if bars[idx].close <= avg_cost * (1.0 - self.config.stop_loss_pct):
             return "stop_loss"
-        if idx >= 1 and fast[idx] is not None and fast[idx - 1] is not None:
-            if bars[idx].close < float(fast[idx]) and bars[idx - 1].close < float(fast[idx - 1]):
-                return "fast_sma_break"
+        if atr_values[idx] is not None:
+            atr_stop = highest_close_since_entry - (float(atr_values[idx]) * self.config.atr_stop_multiplier)
+            if bars[idx].close <= atr_stop and holding_days >= self.config.min_hold_days:
+                return "atr_trailing_stop"
+        if highest_close_since_entry > 0:
+            trailing_stop = highest_close_since_entry * (1.0 - self.config.trailing_stop_pct)
+            if bars[idx].close <= trailing_stop and holding_days >= self.config.min_hold_days:
+                return "trailing_stop"
+        if long[idx] is not None and bars[idx].close < float(long[idx]):
+            return "long_sma_break"
+        if slow[idx] is not None and holding_days >= self.config.min_hold_days:
+            if bars[idx].close < float(slow[idx]) * (1.0 - self.config.round_trip_cost_rate):
+                return "slow_sma_break"
         return None
 
     def _buy(
@@ -216,6 +300,10 @@ class Backtester:
         position_room = max(0.0, max_position_value - current_position_value)
         spendable_cash = max(0.0, cash - reserve_cash)
         budget = min(allocation_budget, position_room, spendable_cash)
+        risk_budget = equity_at_open * self.config.risk_per_trade_pct
+        stop_distance = self.config.stop_loss_pct
+        risk_budget_cap = risk_budget / stop_distance if stop_distance > 0 else budget
+        budget = min(budget, risk_budget_cap)
 
         price = bar.open * (1.0 + self.config.slippage_rate)
         cost_per_share = price * (1.0 + self.config.commission_rate)
@@ -317,6 +405,8 @@ class Backtester:
             "sell_trades": len(sell_trades),
             "sell_win_rate_pct": round((len(winning_sells) / len(sell_trades) * 100.0), 2) if sell_trades else 0.0,
             "realized_pnl": round(sum(trade.realized_pnl for trade in sell_trades), 2),
+            "explicit_trade_cost": round(sum(trade.cost for trade in trades), 2),
+            "round_trip_cost_pct": round(self.config.round_trip_cost_rate * 100.0, 3),
             "exposure_pct": round((exposure_days / len(equity_curve)) * 100.0, 2),
         }
 

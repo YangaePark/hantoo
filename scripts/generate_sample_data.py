@@ -15,15 +15,15 @@ def main() -> int:
     rows = []
     start = date(2025, 1, 2)
     price = 10_000.0
-    for idx in range(140):
-        if idx < 45:
-            price += 25
-        elif idx < 95:
-            price += 95
-        elif idx < 115:
-            price -= 55
+    for idx in range(260):
+        if idx < 70:
+            price += 18
+        elif idx < 150:
+            price += 55 if idx % 7 else -80
+        elif idx < 190:
+            price -= 45
         else:
-            price += 35
+            price += 42 if idx % 6 else -65
 
         rows.append(
             {

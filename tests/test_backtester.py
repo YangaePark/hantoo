@@ -25,6 +25,8 @@ class BacktesterTest(unittest.TestCase):
 
         self.assertGreater(result.metrics["final_equity"], 0)
         self.assertIn("max_drawdown_pct", result.metrics)
+        self.assertIn("explicit_trade_cost", result.metrics)
+        self.assertIn("round_trip_cost_pct", result.metrics)
         self.assertTrue(result.equity_curve)
         self.assertEqual(len(result.equity_curve), len(bars))
 
@@ -33,10 +35,10 @@ def synthetic_bars() -> list[Bar]:
     start = date(2025, 1, 2)
     bars: list[Bar] = []
     price = 10_000.0
-    for idx in range(90):
-        if idx < 30:
+    for idx in range(180):
+        if idx < 60:
             price += 30
-        elif idx < 60:
+        elif idx < 130:
             price += 90
         else:
             price -= 45

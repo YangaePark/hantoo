@@ -20,6 +20,44 @@ def rolling_mean(values: list[float], window: int) -> list[Optional[float]]:
     return result
 
 
+def average_true_range(
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    period: int,
+) -> list[Optional[float]]:
+    if period <= 0:
+        raise ValueError("period must be positive")
+    if not (len(highs) == len(lows) == len(closes)):
+        raise ValueError("highs, lows, and closes must have the same length")
+
+    result: list[Optional[float]] = [None] * len(closes)
+    true_ranges: list[float] = []
+    for idx, close in enumerate(closes):
+        if idx == 0:
+            true_ranges.append(highs[idx] - lows[idx])
+        else:
+            previous_close = closes[idx - 1]
+            true_ranges.append(
+                max(
+                    highs[idx] - lows[idx],
+                    abs(highs[idx] - previous_close),
+                    abs(lows[idx] - previous_close),
+                )
+            )
+
+    if len(true_ranges) < period:
+        return result
+
+    atr_value = sum(true_ranges[:period]) / period
+    result[period - 1] = atr_value
+    for idx in range(period, len(true_ranges)):
+        atr_value = ((atr_value * (period - 1)) + true_ranges[idx]) / period
+        result[idx] = atr_value
+
+    return result
+
+
 def rsi(values: list[float], period: int) -> list[Optional[float]]:
     if period <= 0:
         raise ValueError("period must be positive")
