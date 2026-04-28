@@ -218,22 +218,14 @@ async function loadLiveConfig() {
   $("liveMode").value = config.mode || "paper";
   $("accountNo").value = config.account_no || "";
   $("productCode").value = config.product_code || "01";
-  $("autoSelect").checked = config.auto_select !== false;
-  $("watchlist").value = (config.watchlist || []).join("\n");
 }
 
 function liveConfigPayload() {
-  const watchlist = $("watchlist")
-    .value
-    .split(/[\n,]+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
   return {
     mode: $("liveMode").value,
     account_no: $("accountNo").value.trim(),
     product_code: $("productCode").value.trim() || "01",
-    auto_select: $("autoSelect").checked,
-    watchlist,
+    auto_select: true,
   };
 }
 
@@ -243,8 +235,7 @@ async function saveLiveConfig() {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(liveConfigPayload()),
   });
-  const target = config.auto_select ? "시장 자동선별" : `${config.watchlist.length}종목 수동`;
-  $("liveStatus").textContent = `설정 저장됨: ${config.mode}, ${target}`;
+  $("liveStatus").textContent = `설정 저장됨: ${config.mode}, 시장 자동선별`;
 }
 
 async function loadLiveStatus() {

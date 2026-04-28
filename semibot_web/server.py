@@ -84,9 +84,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if config.mode not in {"paper", "live"}:
                 self._json({"error": "mode must be paper or live"}, HTTPStatus.BAD_REQUEST)
                 return
-            if not config.auto_select and not config.watchlist:
-                self._json({"error": "watchlist is required"}, HTTPStatus.BAD_REQUEST)
-                return
             save_live_config(config)
             self._json(config.to_dict())
         elif parsed.path == "/api/live/start":

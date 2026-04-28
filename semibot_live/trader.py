@@ -27,7 +27,6 @@ class LiveConfig:
     account_no: str = ""
     product_code: str = "01"
     auto_select: bool = True
-    watchlist: list[str] | None = None
     poll_interval_sec: int = 10
     bar_minutes: int = 5
     max_symbols: int = 20
@@ -36,17 +35,11 @@ class LiveConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LiveConfig":
-        watchlist_raw = data.get("watchlist", [])
-        if isinstance(watchlist_raw, str):
-            watchlist = [item.strip() for item in watchlist_raw.replace("\n", ",").split(",") if item.strip()]
-        else:
-            watchlist = [str(item).strip() for item in watchlist_raw if str(item).strip()]
         return cls(
             mode=data.get("mode", "paper"),
             account_no=data.get("account_no", ""),
             product_code=data.get("product_code", "01"),
-            auto_select=bool(data.get("auto_select", True)),
-            watchlist=watchlist,
+            auto_select=True,
             poll_interval_sec=int(data.get("poll_interval_sec", 10)),
             bar_minutes=int(data.get("bar_minutes", 5)),
             max_symbols=int(data.get("max_symbols", 20)),
@@ -60,7 +53,6 @@ class LiveConfig:
             "account_no": self.account_no,
             "product_code": self.product_code,
             "auto_select": self.auto_select,
-            "watchlist": self.watchlist or [],
             "poll_interval_sec": self.poll_interval_sec,
             "bar_minutes": self.bar_minutes,
             "max_symbols": self.max_symbols,
@@ -84,7 +76,7 @@ class LiveTrader:
             "last_error": "",
             "orders": 0,
             "active_symbols": [],
-            "selector": "자동선별" if config.auto_select else "수동",
+            "selector": "자동선별",
             "selector_message": "",
         }
         self.bars: list[StockBar] = []
@@ -149,12 +141,7 @@ class LiveTrader:
             self.running = False
 
     def _initial_symbols(self, client: KisClient) -> list[str]:
-        if self.config.auto_select:
-            return self._select_symbols(client)
-        symbols = _unique_symbols(self.config.watchlist or [])
-        with self.lock:
-            self.status["selector_message"] = f"수동 감시 {len(symbols)}종목"
-        return symbols[: self.config.max_symbols]
+        return self._select_symbols(client)
 
     def _select_symbols(self, client: KisClient) -> list[str]:
         self.last_selection_at = time.time()
@@ -330,7 +317,7 @@ _TRADER: LiveTrader | None = None
 
 def load_live_config() -> LiveConfig:
     if not LIVE_CONFIG_PATH.exists():
-        return LiveConfig(auto_select=True, watchlist=[])
+        return LiveConfig(auto_select=True)
     return LiveConfig.from_dict(json.loads(LIVE_CONFIG_PATH.read_text(encoding="utf-8")))
 
 
@@ -443,22 +430,11 @@ def _idle_status() -> dict[str, Any]:
         "running": False,
         "message": "대기 중",
         "mode": config.mode,
-        "selector": "자동선별" if config.auto_select else "수동",
-        "selector_message": "시장 자동선별 대기" if config.auto_select else f"수동 감시 {len(config.watchlist or [])}종목",
+        "selector": "자동선별",
+        "selector_message": "시장 자동선별 대기",
         "active_symbols": [],
         "orders": 0,
     }
-
-
-def _unique_symbols(symbols: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for symbol in symbols:
-        clean = str(symbol).strip()
-        if clean and clean not in seen:
-            result.append(clean)
-            seen.add(clean)
-    return result
 
 
 def _valid_stock_symbol(symbol: str) -> bool:

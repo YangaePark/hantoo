@@ -8,10 +8,9 @@ class LiveConfigTests(unittest.TestCase):
         config = LiveConfig.from_dict({})
 
         self.assertTrue(config.auto_select)
-        self.assertEqual(config.watchlist, [])
         self.assertEqual(config.max_symbols, 20)
 
-    def test_manual_watchlist_parses_lines_and_commas(self):
+    def test_manual_watchlist_payload_is_ignored(self):
         config = LiveConfig.from_dict(
             {
                 "auto_select": False,
@@ -19,8 +18,8 @@ class LiveConfigTests(unittest.TestCase):
             }
         )
 
-        self.assertFalse(config.auto_select)
-        self.assertEqual(config.watchlist, ["005930", "000660", "042700"])
+        self.assertTrue(config.auto_select)
+        self.assertFalse(hasattr(config, "watchlist"))
 
 
 if __name__ == "__main__":
