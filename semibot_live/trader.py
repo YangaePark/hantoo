@@ -19,6 +19,18 @@ ROOT = Path(__file__).resolve().parents[1]
 LIVE_CONFIG_PATH = ROOT / "config" / "live.local.json"
 KIS_KEYS_PATH = ROOT / "config" / "kis.local.json"
 LIVE_REPORT_DIR = ROOT / "reports" / "live_trading"
+DEFAULT_WATCHLIST = [
+    "000660",
+    "005930",
+    "042700",
+    "058470",
+    "000990",
+    "039030",
+    "240810",
+    "403870",
+    "095340",
+    "357780",
+]
 
 
 @dataclass
@@ -225,7 +237,7 @@ _TRADER: LiveTrader | None = None
 
 def load_live_config() -> LiveConfig:
     if not LIVE_CONFIG_PATH.exists():
-        return LiveConfig(watchlist=["005930", "000660", "042700"])
+        return LiveConfig(watchlist=DEFAULT_WATCHLIST)
     return LiveConfig.from_dict(json.loads(LIVE_CONFIG_PATH.read_text(encoding="utf-8")))
 
 
