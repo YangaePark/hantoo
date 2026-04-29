@@ -88,6 +88,7 @@ class LiveTrader:
             "selector_message": "",
             "seed_capital": strategy.initial_capital,
             "seed_source": config.seed_source,
+            "trade_message": "매수 조건 대기",
         }
         self.bars: list[StockBar] = []
         self.seeded_previous_close: set[str] = set()
@@ -283,15 +284,18 @@ class LiveTrader:
 
     def _evaluate(self, client: KisClient, now: datetime) -> None:
         if len(self.bars) < 50:
+            self._set_trade_message(f"5분봉 데이터 수집 중 ({len(self.bars)}/50)")
             return
         result = StockScannerBacktester(self.strategy).run(self.bars)
         latest_trade = result.trades[-1] if result.trades else None
         if not latest_trade:
+            self._set_trade_message(self._entry_wait_message(now))
             _write_live_metrics(result.metrics)
             return
         last_recorded = _last_trade_key()
         trade_key = f"{latest_trade.timestamp}|{latest_trade.action}|{latest_trade.symbol}|{latest_trade.shares}|{latest_trade.reason}"
         if trade_key == last_recorded:
+            self._set_trade_message("최근 신호는 이미 기록됨")
             return
         live = self.config.mode == "live"
         if latest_trade.action == "BUY":
@@ -306,6 +310,87 @@ class LiveTrader:
         _write_live_metrics(result.metrics)
         with self.lock:
             self.status["orders"] = int(self.status.get("orders", 0)) + 1
+            self.status["trade_message"] = f"최근 주문: {latest_trade.action} {latest_trade.symbol} {latest_trade.shares}주 ({latest_trade.reason})"
+
+    def _set_trade_message(self, message: str) -> None:
+        with self.lock:
+            self.status["trade_message"] = message
+
+    def _entry_wait_message(self, now: datetime) -> str:
+        if not self.active_symbols:
+            return "자동선별 종목 없음"
+        if now.time() >= self.strategy.force_exit_clock:
+            return f"{self.strategy.force_exit_time} 이후 신규 진입 중단"
+
+        messages: list[str] = []
+        for symbol in self.active_symbols[:3]:
+            reason = self._symbol_entry_reason(symbol, now)
+            if reason:
+                messages.append(f"{symbol}: {reason}")
+        return " / ".join(messages) if messages else "매수 조건 대기"
+
+    def _symbol_entry_reason(self, symbol: str, now: datetime) -> str:
+        symbol_bars = sorted((bar for bar in self.bars if bar.symbol == symbol), key=lambda bar: bar.timestamp)
+        if not symbol_bars:
+            return "현재가 수집 대기"
+        current_bars = [bar for bar in symbol_bars if bar.session == now.date()]
+        if not current_bars:
+            return "오늘 5분봉 수집 대기"
+
+        latest = current_bars[-1]
+        previous_close = _previous_close_for(symbol_bars, latest)
+        if previous_close <= 0:
+            return "전일 종가 기준값 대기"
+
+        session_start = current_bars[0].timestamp
+        if latest.timestamp < session_start + timedelta(minutes=self.strategy.observation_minutes):
+            return f"장초반 {self.strategy.observation_minutes}분 관찰 중"
+
+        gap = (current_bars[0].open / previous_close) - 1.0
+        if gap < self.strategy.gap_min_pct:
+            return f"갭 {gap * 100:.1f}% < {self.strategy.gap_min_pct * 100:.1f}%"
+        if gap > self.strategy.gap_max_pct:
+            return f"갭 {gap * 100:.1f}% > {self.strategy.gap_max_pct * 100:.1f}%"
+
+        previous_volumes = [float(bar.volume) for bar in current_bars[:-1]]
+        if len(previous_volumes) < self.strategy.volume_sma:
+            return f"거래량 평균 계산용 봉 부족 ({len(previous_volumes)}/{self.strategy.volume_sma})"
+        volume_avg = sum(previous_volumes[-self.strategy.volume_sma :]) / self.strategy.volume_sma
+        volume_ratio = latest.volume / volume_avg if volume_avg else 0.0
+        if volume_ratio < self.strategy.volume_factor:
+            return f"거래량 {volume_ratio:.1f}배 < {self.strategy.volume_factor:.1f}배"
+
+        atr_pct = _latest_atr_pct(current_bars, self.strategy.atr_period)
+        if atr_pct is None:
+            return "ATR 계산용 봉 부족"
+        if atr_pct < self.strategy.min_atr_pct:
+            return f"변동성 {atr_pct * 100:.1f}% < {self.strategy.min_atr_pct * 100:.1f}%"
+        if atr_pct > self.strategy.max_atr_pct:
+            return f"변동성 {atr_pct * 100:.1f}% > {self.strategy.max_atr_pct * 100:.1f}%"
+
+        vwap = _latest_vwap(current_bars)
+        if vwap <= 0:
+            return "VWAP 계산 대기"
+        if latest.close <= vwap:
+            return "VWAP 아래"
+
+        edge = self.strategy.round_trip_cost_rate + self.strategy.min_edge_rate
+        opening_cutoff = session_start + timedelta(minutes=self.strategy.observation_minutes)
+        opening_bars = [bar for bar in current_bars if bar.timestamp < opening_cutoff]
+        if not opening_bars:
+            return "장초반 고가 기준 대기"
+        opening_high = max(bar.high for bar in opening_bars)
+        if latest.close <= opening_high * (1.0 + edge):
+            return "장초반 고가 미돌파"
+
+        extension = (latest.close / vwap) - 1.0
+        if extension > self.strategy.max_extension_pct:
+            return f"VWAP 이격 {extension * 100:.1f}% > {self.strategy.max_extension_pct * 100:.1f}%"
+
+        lookback_idx = max(0, len(current_bars) - 4)
+        if latest.close <= current_bars[lookback_idx].close:
+            return "최근 모멘텀 부족"
+        return "매수 직전 조건 대기"
 
     def _place_order(self, client: KisClient, side: str, symbol: str, quantity: int, live: bool) -> dict[str, Any]:
         if self.config.mode == "paper":
@@ -448,6 +533,7 @@ def _idle_status() -> dict[str, Any]:
         "orders": 0,
         "seed_capital": config.seed_capital,
         "seed_source": config.seed_source,
+        "trade_message": "자동매매 시작 전",
     }
 
 
@@ -479,3 +565,26 @@ def _positive_float(value: object, default: float) -> float:
 
 def _seed_source(value: object) -> str:
     return "balance_max" if str(value) == "balance_max" else "manual"
+
+
+def _previous_close_for(symbol_bars: list[StockBar], latest: StockBar) -> float:
+    previous = [bar for bar in symbol_bars if bar.session < latest.session]
+    return previous[-1].close if previous else 0.0
+
+
+def _latest_vwap(bars: list[StockBar]) -> float:
+    value = sum(((bar.high + bar.low + bar.close) / 3.0) * bar.volume for bar in bars)
+    volume = sum(bar.volume for bar in bars)
+    return value / volume if volume else 0.0
+
+
+def _latest_atr_pct(bars: list[StockBar], period: int) -> float | None:
+    if len(bars) < period:
+        return None
+    true_ranges: list[float] = []
+    for idx, bar in enumerate(bars):
+        previous_close = bars[idx - 1].close if idx else bar.close
+        true_ranges.append(max(bar.high - bar.low, abs(bar.high - previous_close), abs(bar.low - previous_close)))
+    atr = sum(true_ranges[-period:]) / period
+    close = bars[-1].close
+    return (atr / close) if close > 0 else None

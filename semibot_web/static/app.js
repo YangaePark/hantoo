@@ -270,6 +270,7 @@ async function loadLiveStatus() {
   if (position.symbol) pieces.push(`보유: ${position.symbol} ${position.shares}주`);
   if (status.last_error) pieces.push(`오류: ${status.last_error}`);
   $("liveStatus").textContent = pieces.join(" / ");
+  $("tradeReasonStatus").textContent = `매수대기 사유: ${status.trade_message || "-"}`;
   return status;
 }
 
