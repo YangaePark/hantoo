@@ -4,7 +4,7 @@
   "top_value_rank": 5,
   "gap_min_pct": 0.02,
   "gap_max_pct": 0.08,
-  "volume_sma": 12,
+  "volume_sma": 4,
   "volume_factor": 2.0,
   "atr_period": 6,
   "min_atr_pct": 0.006,

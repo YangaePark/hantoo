@@ -35,7 +35,9 @@ class LiveConfig:
     poll_interval_sec: int = 10
     bar_minutes: int = 5
     max_symbols: int = 20
-    selection_refresh_sec: int = 60
+    selection_refresh_sec: int = 300
+    min_selection_hold_sec: int = 600
+    min_bars_before_evaluate: int = 20
     candidate_pool_size: int = 60
 
     @classmethod
@@ -51,7 +53,9 @@ class LiveConfig:
             poll_interval_sec=int(data.get("poll_interval_sec", 10)),
             bar_minutes=int(data.get("bar_minutes", 5)),
             max_symbols=int(data.get("max_symbols", 20)),
-            selection_refresh_sec=int(data.get("selection_refresh_sec", 60)),
+            selection_refresh_sec=max(300, int(data.get("selection_refresh_sec", 300))),
+            min_selection_hold_sec=max(600, int(data.get("min_selection_hold_sec", 600))),
+            min_bars_before_evaluate=max(1, int(data.get("min_bars_before_evaluate", 20))),
             candidate_pool_size=int(data.get("candidate_pool_size", 60)),
         )
 
@@ -68,6 +72,8 @@ class LiveConfig:
             "bar_minutes": self.bar_minutes,
             "max_symbols": self.max_symbols,
             "selection_refresh_sec": self.selection_refresh_sec,
+            "min_selection_hold_sec": self.min_selection_hold_sec,
+            "min_bars_before_evaluate": self.min_bars_before_evaluate,
             "candidate_pool_size": self.candidate_pool_size,
         }
 
@@ -97,6 +103,7 @@ class LiveTrader:
         self.bars: list[StockBar] = []
         self.seeded_previous_close: set[str] = set()
         self.active_symbols: list[str] = []
+        self.selected_since: dict[str, float] = {}
         self.last_selection_at = 0.0
         self.position: dict[str, Any] | None = None
         self.cash = strategy.initial_capital
@@ -162,7 +169,8 @@ class LiveTrader:
         return self._select_symbols(client)
 
     def _select_symbols(self, client: KisClient) -> list[str]:
-        self.last_selection_at = time.time()
+        now_ts = time.time()
+        self.last_selection_at = now_ts
         candidates = self._candidate_symbols(client)
         ranked: list[tuple[float, str]] = []
         candidate_items = sorted(candidates.items(), key=lambda item: _source_priority(item[1]), reverse=True)
@@ -175,10 +183,26 @@ class LiveTrader:
             ranked.append((score, symbol))
             time.sleep(0.04)
         ranked.sort(reverse=True)
-        selected = [symbol for _, symbol in ranked[: self.config.max_symbols]]
+        fresh_selected = [symbol for _, symbol in ranked[: self.config.max_symbols]]
+        selected = self._merge_selected_symbols(fresh_selected, now_ts)
         with self.lock:
             self.status["selector_message"] = f"자동선별 {len(selected)}종목 / 후보 {len(candidates)}종목"
             self.status["active_symbols"] = selected
+        return selected
+
+    def _merge_selected_symbols(self, fresh_selected: list[str], now_ts: float) -> list[str]:
+        kept = [
+            symbol
+            for symbol in self.active_symbols
+            if now_ts - self.selected_since.get(symbol, now_ts) < self.config.min_selection_hold_sec
+        ]
+        selected: list[str] = []
+        for symbol in kept + fresh_selected:
+            if symbol not in selected and len(selected) < self.config.max_symbols:
+                selected.append(symbol)
+        for symbol in selected:
+            self.selected_since.setdefault(symbol, now_ts)
+        self.selected_since = {symbol: since for symbol, since in self.selected_since.items() if symbol in selected}
         return selected
 
     def _candidate_symbols(self, client: KisClient) -> dict[str, dict[str, Any]]:
@@ -288,8 +312,8 @@ class LiveTrader:
         self.seeded_previous_close.add(symbol)
 
     def _evaluate(self, client: KisClient, now: datetime) -> None:
-        if len(self.bars) < 50:
-            self._set_trade_message(f"5분봉 데이터 수집 중 ({len(self.bars)}/50)")
+        if len(self.bars) < self.config.min_bars_before_evaluate:
+            self._set_trade_message(f"5분봉 데이터 수집 중 ({len(self.bars)}/{self.config.min_bars_before_evaluate})")
             return
         result = StockScannerBacktester(self.strategy).run(self.bars)
         latest_trade = result.trades[-1] if result.trades else None

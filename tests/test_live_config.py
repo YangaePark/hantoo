@@ -12,9 +12,17 @@ class LiveConfigTests(unittest.TestCase):
 
         self.assertTrue(config.auto_select)
         self.assertEqual(config.max_symbols, 20)
+        self.assertEqual(config.selection_refresh_sec, 300)
+        self.assertEqual(config.min_selection_hold_sec, 600)
+        self.assertEqual(config.min_bars_before_evaluate, 20)
         self.assertEqual(config.seed_capital, 1_000_000.0)
         self.assertEqual(config.seed_source, "manual")
         self.assertFalse(config.auto_start)
+
+    def test_old_fast_selection_refresh_is_migrated(self):
+        config = LiveConfig.from_dict({"selection_refresh_sec": 60})
+
+        self.assertEqual(config.selection_refresh_sec, 300)
 
     def test_seed_capital_can_be_configured(self):
         config = LiveConfig.from_dict({"seed_capital": "1500000"})
@@ -78,6 +86,18 @@ class LiveConfigTests(unittest.TestCase):
         message = trader._symbol_entry_reason("005930", start + timedelta(minutes=21))
 
         self.assertIn("거래량", message)
+
+    def test_selected_symbols_are_kept_for_minimum_hold(self):
+        config = LiveConfig(max_symbols=3, min_selection_hold_sec=600)
+        trader = LiveTrader(config, StockScannerConfig())
+        trader.active_symbols = ["111111", "222222"]
+        trader.selected_since = {"111111": 1000.0, "222222": 500.0}
+
+        selected = trader._merge_selected_symbols(["333333"], 1200.0)
+
+        self.assertEqual(selected, ["111111", "333333"])
+        self.assertIn("111111", trader.selected_since)
+        self.assertNotIn("222222", trader.selected_since)
 
 
 if __name__ == "__main__":
