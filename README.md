@@ -134,6 +134,16 @@ http://<NAS-IP>:8000
 
 GitHub `main`에 새 커밋이 올라간 뒤 Synology Container Manager에서 `hantoo` 프로젝트를 중지하고 다시 Build/Deploy 하면 최신 코드가 반영됩니다.
 
+SSH로 업데이트한다면 재시작 스크립트를 받아 실행하면 됩니다.
+
+```bash
+sudo mkdir -p /volume1/docker/hantoo
+cd /volume1/docker/hantoo
+sudo curl -fsSL -o restart.sh https://raw.githubusercontent.com/YangaePark/hantoo/main/deploy/synology/restart.sh
+sudo chmod +x restart.sh
+sudo ./restart.sh
+```
+
 로컬 Docker에서 확인하려면 아래처럼 실행할 수 있습니다. 단, Compose 파일의 볼륨 경로가 Synology 기준이므로 일반 PC에서는 필요에 맞게 경로를 바꾸세요.
 
 ```bash

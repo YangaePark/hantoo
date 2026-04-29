@@ -57,7 +57,23 @@ http://<NAS-IP>:8000
 
 ## 업데이트
 
-GitHub `main`에 새 커밋을 올린 뒤 Container Manager에서 `hantoo` 프로젝트를 중지하고 다시 Build/Deploy 하면 최신 코드가 반영됩니다.
+GitHub `main`에 새 커밋이 올라간 뒤 아래 스크립트를 실행하면 최신 코드로 다시 빌드하고 컨테이너를 재시작합니다.
+
+```bash
+sudo mkdir -p /volume1/docker/hantoo
+cd /volume1/docker/hantoo
+sudo curl -fsSL -o restart.sh https://raw.githubusercontent.com/YangaePark/hantoo/main/deploy/synology/restart.sh
+sudo chmod +x restart.sh
+sudo ./restart.sh
+```
+
+프로젝트 경로가 다르면 경로를 인자로 넘길 수 있습니다.
+
+```bash
+sudo ./restart.sh /volume2/docker/hantoo
+```
+
+Container Manager UI를 쓴다면 `hantoo` 프로젝트를 중지한 뒤 다시 Build/Deploy 해도 최신 코드가 반영됩니다.
 
 ## 접근 권장
 
