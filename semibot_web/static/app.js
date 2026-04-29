@@ -226,6 +226,7 @@ async function loadLiveConfig() {
   $("productCode").value = config.product_code || "01";
   $("seedCapital").value = Math.round(Number(config.seed_capital || 1000000));
   $("seedBalanceMax").checked = config.seed_source === "balance_max";
+  $("autoStartTrading").checked = Boolean(config.auto_start);
   updateSeedInputState();
 }
 
@@ -240,18 +241,24 @@ function liveConfigPayload() {
     product_code: $("productCode").value.trim() || "01",
     seed_capital: seed,
     seed_source: $("seedBalanceMax").checked ? "balance_max" : "manual",
+    auto_start: $("autoStartTrading").checked,
     auto_select: true,
   };
 }
 
-async function saveLiveConfig() {
+async function saveLiveConfig(confirmAutoStart = true) {
+  if (confirmAutoStart && $("liveMode").value === "live" && $("autoStartTrading").checked) {
+    const ok = confirm("실전 주문 모드에서 자동시작을 켜면 NAS 재부팅이나 컨테이너 재시작 후 조건 충족 시 실제 주문이 전송될 수 있습니다. 저장할까요?");
+    if (!ok) return null;
+  }
   const config = await getJSON("/api/live/config", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(liveConfigPayload()),
   });
   const seedText = config.seed_source === "balance_max" ? `잔고 최대 사용 (${money(config.seed_capital)} 예비값)` : money(config.seed_capital);
-  $("liveStatus").textContent = `설정 저장됨: ${config.mode}, 시드 ${seedText}, 시장 자동선별`;
+  $("liveStatus").textContent = `설정 저장됨: ${config.mode}, 시드 ${seedText}, 자동시작 ${config.auto_start ? "켜짐" : "꺼짐"}, 시장 자동선별`;
+  return config;
 }
 
 async function loadLiveStatus() {
@@ -262,6 +269,7 @@ async function loadLiveStatus() {
     status.running ? "실행 중" : "대기 중",
     `모드: ${status.mode || $("liveMode").value || "paper"}`,
     `시드: ${status.seed_source === "balance_max" ? "잔고 최대 " : ""}${money(status.seed_capital || $("seedCapital").value || 0)}`,
+    `자동시작: ${status.auto_start ? "켜짐" : "꺼짐"}`,
     `선별: ${status.selector_message || status.selector || "-"}`,
     `추적: ${activeSymbols.length}종목`,
     `주문기록: ${Number(status.orders || 0).toLocaleString("ko-KR")}건`,
@@ -275,7 +283,8 @@ async function loadLiveStatus() {
 }
 
 async function startLive() {
-  await saveLiveConfig();
+  const saved = await saveLiveConfig(false);
+  if (!saved) return;
   const mode = $("liveMode").value;
   if (mode === "live") {
     const ok = confirm("실전 주문 모드입니다. 조건 충족 시 실제 매수/매도 주문이 전송됩니다. 시작할까요?");

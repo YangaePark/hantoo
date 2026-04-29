@@ -272,6 +272,17 @@ def load_live_strategy_config(seed_capital: float | None = None) -> StockScanner
     return config
 
 
+def auto_start_live_trader() -> dict:
+    config = load_live_config()
+    if not config.auto_start:
+        return {"running": False, "message": "자동시작 꺼짐"}
+    seed_capital, seed_error = resolve_seed_capital(config)
+    if seed_capital <= 0:
+        return {"running": False, "message": seed_error or "자동시작 실패: 시드 금액 없음"}
+    strategy = load_live_strategy_config(seed_capital)
+    return start_live_trader(strategy)
+
+
 def _read_json_file(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -324,6 +335,11 @@ def run(host: str = "127.0.0.1", port: int = 8000) -> None:
     ensure_live_report()
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     print(f"Dashboard running at http://{host}:{port}")
+    auto_start_status = auto_start_live_trader()
+    if auto_start_status.get("running"):
+        print("[live] 자동매매 자동시작")
+    elif load_live_config().auto_start:
+        print(f"[live] 자동시작 실패: {auto_start_status.get('message', 'unknown')}")
     server.serve_forever()
 
 

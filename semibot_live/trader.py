@@ -30,6 +30,7 @@ class LiveConfig:
     product_code: str = "01"
     seed_capital: float = 1_000_000.0
     seed_source: str = "manual"
+    auto_start: bool = False
     auto_select: bool = True
     poll_interval_sec: int = 10
     bar_minutes: int = 5
@@ -45,6 +46,7 @@ class LiveConfig:
             product_code=data.get("product_code", "01"),
             seed_capital=_positive_float(data.get("seed_capital"), 1_000_000.0),
             seed_source=_seed_source(data.get("seed_source", "manual")),
+            auto_start=_truthy(data.get("auto_start")),
             auto_select=True,
             poll_interval_sec=int(data.get("poll_interval_sec", 10)),
             bar_minutes=int(data.get("bar_minutes", 5)),
@@ -60,6 +62,7 @@ class LiveConfig:
             "product_code": self.product_code,
             "seed_capital": self.seed_capital,
             "seed_source": self.seed_source,
+            "auto_start": self.auto_start,
             "auto_select": self.auto_select,
             "poll_interval_sec": self.poll_interval_sec,
             "bar_minutes": self.bar_minutes,
@@ -88,6 +91,7 @@ class LiveTrader:
             "selector_message": "",
             "seed_capital": strategy.initial_capital,
             "seed_source": config.seed_source,
+            "auto_start": config.auto_start,
             "trade_message": "매수 조건 대기",
         }
         self.bars: list[StockBar] = []
@@ -116,6 +120,7 @@ class LiveTrader:
             data["cash"] = round(self.cash, 2)
             data["seed_capital"] = round(self.strategy.initial_capital, 2)
             data["seed_source"] = self.config.seed_source
+            data["auto_start"] = self.config.auto_start
             data["active_symbols"] = list(self.active_symbols)
             return data
 
@@ -533,6 +538,7 @@ def _idle_status() -> dict[str, Any]:
         "orders": 0,
         "seed_capital": config.seed_capital,
         "seed_source": config.seed_source,
+        "auto_start": config.auto_start,
         "trade_message": "자동매매 시작 전",
     }
 
@@ -565,6 +571,12 @@ def _positive_float(value: object, default: float) -> float:
 
 def _seed_source(value: object) -> str:
     return "balance_max" if str(value) == "balance_max" else "manual"
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _previous_close_for(symbol_bars: list[StockBar], latest: StockBar) -> float:

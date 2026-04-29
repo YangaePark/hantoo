@@ -14,6 +14,7 @@ class LiveConfigTests(unittest.TestCase):
         self.assertEqual(config.max_symbols, 20)
         self.assertEqual(config.seed_capital, 1_000_000.0)
         self.assertEqual(config.seed_source, "manual")
+        self.assertFalse(config.auto_start)
 
     def test_seed_capital_can_be_configured(self):
         config = LiveConfig.from_dict({"seed_capital": "1500000"})
@@ -34,6 +35,12 @@ class LiveConfigTests(unittest.TestCase):
         config = LiveConfig.from_dict({"seed_source": "something_else"})
 
         self.assertEqual(config.seed_source, "manual")
+
+    def test_auto_start_can_be_configured(self):
+        config = LiveConfig.from_dict({"auto_start": True})
+
+        self.assertTrue(config.auto_start)
+        self.assertTrue(config.to_dict()["auto_start"])
 
     def test_manual_watchlist_payload_is_ignored(self):
         config = LiveConfig.from_dict(
