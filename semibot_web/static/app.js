@@ -299,8 +299,15 @@ async function loadLiveStatus() {
     `자동시작: ${status.auto_start ? "켜짐" : "꺼짐"}`,
     `선별: ${status.selector_message || status.selector || "-"}`,
     `추적: ${activeSymbols.length}종목`,
+    `5분봉: ${Number(status.bar_count || 0).toLocaleString("ko-KR")}개`,
     `주문기록: ${Number(status.orders || 0).toLocaleString("ko-KR")}건`,
   ];
+  if (status.bar_min_ready) {
+    pieces.push(`봉준비: ${Number(status.bar_ready_symbols || 0).toLocaleString("ko-KR")}/${activeSymbols.length}종목(${status.bar_min_ready}봉)`);
+  }
+  if (status.price_error_count) {
+    pieces.push(`현재가 실패: ${Number(status.price_error_count).toLocaleString("ko-KR")}종목`);
+  }
   if (status.session_label) pieces.push(`세션: ${status.session_label}`);
   if (status.last_tick) pieces.push(`최근: ${status.last_tick}`);
   if (position.symbol) pieces.push(`보유: ${position.symbol} ${position.shares}주`);

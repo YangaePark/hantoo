@@ -203,6 +203,26 @@ class LiveConfigTests(unittest.TestCase):
         self.assertNotIn("QQQ", selected)
         self.assertIn("NASDAQ 자동선별", trader.status["selector_message"])
 
+    def test_overseas_selector_tracks_ranked_symbols_before_entry_filter_passes(self):
+        config = LiveConfig.from_dict({"market": "overseas", "max_symbols": 2, "candidate_pool_size": 10})
+        trader = LiveTrader(config, StockScannerConfig())
+
+        selected = trader._select_symbols(WeakOverseasRankClient())
+
+        self.assertEqual(len(selected), 2)
+        self.assertIn("AAPL", selected)
+        self.assertIn("TSLA", selected)
+
+    def test_overseas_selector_keeps_tracking_when_one_price_lookup_fails(self):
+        config = LiveConfig.from_dict({"market": "overseas", "max_symbols": 2, "candidate_pool_size": 10})
+        trader = LiveTrader(config, StockScannerConfig())
+
+        selected = trader._select_symbols(FlakyOverseasPriceClient())
+
+        self.assertEqual(len(selected), 2)
+        self.assertIn("AAPL", selected)
+        self.assertIn("TSLA", selected)
+
     def test_overseas_premarket_strategy_is_stricter(self):
         config = LiveConfig.from_dict({"market": "overseas", "overseas_premarket_enabled": True})
         trader = LiveTrader(config, StockScannerConfig())
@@ -499,6 +519,28 @@ class FakeOverseasRankClient:
             "TSLA": {"last": "252.00", "open": "249.00", "high": "260.00", "low": "247.00", "tvol": "18000000", "tamt": "4600000000", "base": "244.00"},
         }
         return {"output": prices[symbol]}
+
+
+class WeakOverseasRankClient(FakeOverseasRankClient):
+    def inquire_overseas_price(self, exchange_code, symbol):
+        return {
+            "output": {
+                "last": "100.00",
+                "open": "100.00",
+                "high": "100.20",
+                "low": "99.90",
+                "tvol": "1000",
+                "tamt": "100000",
+                "base": "100.00",
+            }
+        }
+
+
+class FlakyOverseasPriceClient(FakeOverseasRankClient):
+    def inquire_overseas_price(self, exchange_code, symbol):
+        if symbol == "AAPL":
+            raise RuntimeError("temporary quote error")
+        return super().inquire_overseas_price(exchange_code, symbol)
 
 
 class EmptyOverseasRankClient:

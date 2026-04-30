@@ -188,6 +188,11 @@ class LiveTrader:
             "session": "",
             "session_label": "",
             "overseas_premarket_enabled": config.overseas_premarket_enabled,
+            "bar_count": 0,
+            "bar_ready_symbols": 0,
+            "bar_min_ready": 0,
+            "bar_counts": {},
+            "price_error_count": 0,
             "trade_message": "매수 조건 대기",
         }
         self.bars: list[StockBar] = []
@@ -257,12 +262,21 @@ class LiveTrader:
         )
         if should_select:
             self.active_symbols = self._select_symbols(client)
+        price_errors = []
+        updated_symbols: set[str] = set()
         for symbol in self.active_symbols:
-            parsed = self._fetch_price(client, symbol)
+            try:
+                parsed = self._fetch_price(client, symbol)
+            except Exception as exc:  # noqa: BLE001
+                price_errors.append({"symbol": symbol, "error": str(exc)})
+                continue
             if parsed["price"] <= 0:
+                price_errors.append({"symbol": symbol, "error": "price<=0"})
                 continue
             self._add_tick(symbol, strategy_now, parsed)
-        self._evaluate(client, strategy_now)
+            updated_symbols.add(symbol)
+        self._evaluate(client, strategy_now, updated_symbols)
+        bar_status = self._bar_collection_status(strategy_now)
         self._log_decision(
             "cycle",
             strategy_now,
@@ -271,6 +285,8 @@ class LiveTrader:
             position=self.position or {},
             cash=round(self.cash, 2),
             trade_message=str(self.status.get("trade_message", "")),
+            bar_collection=bar_status,
+            price_errors=price_errors[:12],
         )
         with self.lock:
             self.status.update(
@@ -281,6 +297,11 @@ class LiveTrader:
                     "active_symbols": list(self.active_symbols),
                     "session": session,
                     "session_label": _session_label(session),
+                    "bar_count": bar_status["total"],
+                    "bar_ready_symbols": bar_status["ready_symbols"],
+                    "bar_min_ready": bar_status["min_ready"],
+                    "bar_counts": bar_status["by_symbol"],
+                    "price_error_count": len(price_errors),
                 }
             )
 
@@ -337,8 +358,14 @@ class LiveTrader:
         ranked: list[tuple[float, str]] = []
         rejected: list[dict[str, Any]] = []
         candidate_items = sorted(candidates.items(), key=lambda item: _source_priority(item[1]), reverse=True)
+        tracking_symbols = [symbol for symbol, _ in candidate_items[: self.config.candidate_pool_size]]
         for symbol, row in candidate_items[: self.config.candidate_pool_size]:
-            parsed = self._fetch_price(client, symbol)
+            try:
+                parsed = self._fetch_price(client, symbol)
+            except Exception as exc:  # noqa: BLE001
+                if len(rejected) < 12:
+                    rejected.append({"symbol": symbol, "reason": f"price_error {exc}", "price": 0})
+                continue
             passed, reject_reason = self._live_candidate_filter(parsed, row)
             if not passed:
                 if len(rejected) < 12:
@@ -349,6 +376,12 @@ class LiveTrader:
             time.sleep(0.08 if self.market == OVERSEAS_MARKET else 0.04)
         ranked.sort(reverse=True)
         fresh_selected = [symbol for _, symbol in ranked[: self.config.max_symbols]]
+        if self.market == OVERSEAS_MARKET and len(fresh_selected) < self.config.max_symbols:
+            for symbol in tracking_symbols:
+                if symbol not in fresh_selected:
+                    fresh_selected.append(symbol)
+                if len(fresh_selected) >= self.config.max_symbols:
+                    break
         selected = self._merge_selected_symbols(fresh_selected, now_ts)
         with self.lock:
             market_label = "NASDAQ 자동선별" if self.market == OVERSEAS_MARKET else "자동선별"
@@ -565,6 +598,27 @@ class LiveTrader:
             return 0
         return max(0, cumulative_volume - previous)
 
+    def _bar_collection_status(self, now: datetime) -> dict[str, Any]:
+        strategy = self._active_strategy(now)
+        min_ready = self._direct_entry_profile(now, strategy).min_bars
+        by_symbol: dict[str, int] = {}
+        latest_by_symbol: dict[str, str] = {}
+        for symbol in self.active_symbols:
+            current_bars = sorted(
+                (bar for bar in self.bars if bar.symbol == symbol and bar.session == now.date()),
+                key=lambda bar: bar.timestamp,
+            )
+            by_symbol[symbol] = len(current_bars)
+            if current_bars:
+                latest_by_symbol[symbol] = current_bars[-1].timestamp.isoformat(sep=" ", timespec="minutes")
+        return {
+            "total": sum(by_symbol.values()),
+            "ready_symbols": sum(1 for count in by_symbol.values() if count >= min_ready),
+            "min_ready": min_ready,
+            "by_symbol": by_symbol,
+            "latest_by_symbol": latest_by_symbol,
+        }
+
     def _seed_previous_close(self, symbol: str, now: datetime, parsed: dict[str, float]) -> None:
         if symbol in self.seeded_previous_close:
             return
@@ -587,22 +641,25 @@ class LiveTrader:
         )
         self.seeded_previous_close.add(symbol)
 
-    def _evaluate(self, client: KisClient, now: datetime) -> None:
+    def _evaluate(self, client: KisClient, now: datetime, fresh_symbols: set[str] | None = None) -> None:
         strategy = self._active_strategy(now)
-        if self._try_live_direct_exit(client, now, strategy):
+        if self._try_live_direct_exit(client, now, strategy, fresh_symbols):
             return
         if len(self.bars) < self.config.min_bars_before_evaluate:
-            if self._try_live_direct_entry(client, now, strategy, {}, []):
+            if self._try_live_direct_entry(client, now, strategy, {}, [], fresh_symbols):
                 return
             self._set_trade_message(f"5분봉 데이터 수집 중 ({len(self.bars)}/{self.config.min_bars_before_evaluate})")
             return
         result = StockScannerBacktester(strategy).run(self.bars)
         latest_trade = result.trades[-1] if result.trades else None
         if not latest_trade:
-            if self._try_live_direct_entry(client, now, strategy, result.metrics, result.equity_curve):
+            if self._try_live_direct_entry(client, now, strategy, result.metrics, result.equity_curve, fresh_symbols):
                 return
             self._set_trade_message(self._entry_wait_message(now))
             _write_live_metrics(result.metrics, self.report_dir)
+            return
+        if fresh_symbols is not None and latest_trade.symbol not in fresh_symbols:
+            self._set_trade_message(f"{latest_trade.symbol}: 현재가 갱신 대기")
             return
         last_recorded = _last_trade_key(self.report_dir)
         trade_key = f"{latest_trade.timestamp}|{latest_trade.action}|{latest_trade.symbol}|{latest_trade.shares}|{latest_trade.reason}"
@@ -642,12 +699,14 @@ class LiveTrader:
         strategy: StockScannerConfig,
         metrics: dict[str, Any],
         equity_curve: list[dict[str, Any]],
+        fresh_symbols: set[str] | None = None,
     ) -> bool:
         if self.config.mode != "live" or self.position or now.time() >= strategy.force_exit_clock:
             return False
+        symbols = [symbol for symbol in self.active_symbols if fresh_symbols is None or symbol in fresh_symbols]
         candidates = [
             candidate
-            for symbol in self.active_symbols
+            for symbol in symbols
             if (candidate := self._live_direct_entry_candidate(symbol, now, strategy)) is not None
         ]
         if not candidates:
@@ -703,13 +762,21 @@ class LiveTrader:
             self.status["trade_message"] = f"최근 주문: BUY {trade.symbol} {trade.shares}주 ({trade.reason})"
         return True
 
-    def _try_live_direct_exit(self, client: KisClient, now: datetime, strategy: StockScannerConfig) -> bool:
+    def _try_live_direct_exit(
+        self,
+        client: KisClient,
+        now: datetime,
+        strategy: StockScannerConfig,
+        fresh_symbols: set[str] | None = None,
+    ) -> bool:
         if self.config.mode != "live" or not self.position:
             return False
         symbol = str(self.position.get("symbol") or "")
         shares = int(self.position.get("shares") or 0)
         entry_price = float(self.position.get("entry_price") or 0.0)
         if not symbol or shares <= 0 or entry_price <= 0:
+            return False
+        if fresh_symbols is not None and symbol not in fresh_symbols:
             return False
         latest = _latest_symbol_bar(self.bars, symbol, now.date())
         if not latest:
@@ -1181,6 +1248,11 @@ def _idle_status(market: str = DEFAULT_MARKET) -> dict[str, Any]:
         "session": "",
         "session_label": "",
         "overseas_premarket_enabled": config.overseas_premarket_enabled,
+        "bar_count": 0,
+        "bar_ready_symbols": 0,
+        "bar_min_ready": 0,
+        "bar_counts": {},
+        "price_error_count": 0,
         "trade_message": "자동매매 시작 전",
     }
 
