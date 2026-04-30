@@ -592,12 +592,20 @@ class LiveTrader:
         if now.time() >= strategy.force_exit_clock:
             return f"{strategy.force_exit_time} 이후 신규 진입 중단"
 
-        messages: list[str] = []
-        for symbol in self.active_symbols[:3]:
+        reasons: list[tuple[str, str]] = []
+        for symbol in self.active_symbols:
             reason = self._symbol_entry_reason(symbol, now)
             if reason:
-                messages.append(f"{symbol}: {reason}")
-        return f"{prefix}{' / '.join(messages)}" if messages else f"{prefix}매수 조건 대기"
+                reasons.append((symbol, reason))
+        if not reasons:
+            return f"{prefix}매수 조건 대기"
+        messages = [f"{symbol}: {reason}" for symbol, reason in reasons[:5]]
+        summary = _reason_summary([reason for _, reason in reasons])
+        if len(reasons) > len(messages):
+            messages.append(f"외 {len(reasons) - len(messages)}종목")
+        if summary:
+            messages.append(f"요약: {summary}")
+        return f"{prefix}{' / '.join(messages)}"
 
     def _active_strategy(self, now: datetime) -> StockScannerConfig:
         if self.market == OVERSEAS_MARKET and self._market_session(now) == SESSION_PREMARKET:
@@ -621,6 +629,23 @@ class LiveTrader:
                 trailing_stop_pct=max(self.strategy.trailing_stop_pct, 0.014),
                 daily_stop_loss_pct=min(self.strategy.daily_stop_loss_pct, 0.025),
                 max_trades_per_day=min(self.strategy.max_trades_per_day, 3),
+            )
+        if self.market == DEFAULT_MARKET and self.config.mode == "live":
+            return replace(
+                self.strategy,
+                observation_minutes=min(self.strategy.observation_minutes, 10),
+                top_value_rank=max(self.strategy.top_value_rank, 8),
+                gap_min_pct=min(self.strategy.gap_min_pct, 0.008),
+                gap_max_pct=max(self.strategy.gap_max_pct, 0.12),
+                volume_sma=min(self.strategy.volume_sma, 3),
+                volume_factor=min(self.strategy.volume_factor, 1.3),
+                atr_period=min(self.strategy.atr_period, 4),
+                min_atr_pct=min(self.strategy.min_atr_pct, 0.0025),
+                max_atr_pct=max(self.strategy.max_atr_pct, 0.08),
+                min_edge_bps=min(self.strategy.min_edge_bps, 15.0),
+                max_extension_pct=max(self.strategy.max_extension_pct, 0.07),
+                max_trades_per_day=max(self.strategy.max_trades_per_day, 8),
+                cooldown_bars=min(self.strategy.cooldown_bars, 1),
             )
         return self.strategy
 
@@ -913,6 +938,35 @@ def _market_label(market: str) -> str:
 
 def _strategy_name(market: str) -> str:
     return "live_overseas_stock_scanner" if _market(market) == OVERSEAS_MARKET else "live_volatile_stock_scanner"
+
+
+def _reason_summary(reasons: list[str]) -> str:
+    buckets: dict[str, int] = {}
+    for reason in reasons:
+        label = _reason_bucket(reason)
+        buckets[label] = buckets.get(label, 0) + 1
+    if not buckets:
+        return ""
+    ordered = sorted(buckets.items(), key=lambda item: item[1], reverse=True)
+    return ", ".join(f"{label} {count}" for label, count in ordered[:3])
+
+
+def _reason_bucket(reason: str) -> str:
+    if reason.startswith("진입 전 관찰"):
+        return "관찰중"
+    if reason.startswith("상승률"):
+        return "상승률"
+    if reason.startswith("거래량"):
+        return "거래량"
+    if reason.startswith("변동성") or reason.startswith("ATR"):
+        return "변동성"
+    if "VWAP" in reason:
+        return "VWAP"
+    if "고가" in reason:
+        return "돌파"
+    if "모멘텀" in reason:
+        return "모멘텀"
+    return reason.split(" ", 1)[0]
 
 
 def live_config_path(market: str = DEFAULT_MARKET) -> Path:

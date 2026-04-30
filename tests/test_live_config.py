@@ -210,6 +210,33 @@ class LiveConfigTests(unittest.TestCase):
         self.assertLessEqual(strategy.max_position_pct, 0.5)
         self.assertGreaterEqual(strategy.volume_factor, 2.2)
 
+    def test_domestic_live_strategy_is_more_active(self):
+        trader = LiveTrader(LiveConfig(mode="live"), StockScannerConfig())
+        strategy = trader._active_strategy(datetime(2026, 4, 30, 12, 0))
+
+        self.assertEqual(strategy.observation_minutes, 10)
+        self.assertEqual(strategy.top_value_rank, 8)
+        self.assertLessEqual(strategy.gap_min_pct, 0.008)
+        self.assertLessEqual(strategy.volume_factor, 1.3)
+
+    def test_entry_wait_message_summarizes_all_active_symbol_reasons(self):
+        strategy = replace(StockScannerConfig(), observation_minutes=20)
+        trader = LiveTrader(LiveConfig(), strategy)
+        start = datetime(2026, 4, 30, 9, 0)
+        trader.active_symbols = ["000001", "000002", "000003", "000004", "000005", "000006"]
+        trader.bars = [
+            StockBar(symbol, start - timedelta(days=1), 100.0, 100.0, 100.0, 100.0, 1)
+            for symbol in trader.active_symbols
+        ] + [
+            StockBar(symbol, start, 103.0, 103.0, 103.0, 103.0, 1000)
+            for symbol in trader.active_symbols
+        ]
+
+        message = trader._entry_wait_message(start + timedelta(minutes=5))
+
+        self.assertIn("외 1종목", message)
+        self.assertIn("요약: 관찰중 6", message)
+
     def test_overseas_premarket_disabled_waits_for_regular_session(self):
         config = LiveConfig.from_dict({"market": "overseas"})
         trader = LiveTrader(config, StockScannerConfig())
