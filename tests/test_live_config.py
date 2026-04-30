@@ -1,6 +1,8 @@
 import unittest
+import tempfile
 from dataclasses import replace
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from semibot_backtester.stock_scanner import StockBar, StockScannerConfig
 from semibot_live.trader import DEFAULT_MARKET, OVERSEAS_MARKET, LiveConfig, LiveTrader, live_report_dir
@@ -281,6 +283,64 @@ class LiveConfigTests(unittest.TestCase):
         self.assertIn("Temporary failure", status["last_error"])
         self.assertEqual(status["active_symbols"], ["005930"])
 
+    def test_live_direct_entry_orders_when_backtester_has_no_breakout_trade(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = replace(
+                StockScannerConfig(),
+                initial_capital=1_000_000,
+                observation_minutes=5,
+                gap_min_pct=0.003,
+                gap_max_pct=0.12,
+                volume_sma=2,
+                volume_factor=1.0,
+                min_atr_pct=0.0,
+                max_atr_pct=0.2,
+            )
+            trader = LiveTrader(
+                LiveConfig(mode="live", account_no="12345678"),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            start = datetime(2026, 4, 30, 9, 0)
+            trader.active_symbols = ["005930"]
+            trader.cash = 1_000_000
+            trader.bars = [
+                StockBar("005930", start - timedelta(days=1), 100.0, 100.0, 100.0, 100.0, 1),
+                StockBar("005930", start, 101.0, 110.0, 100.5, 101.0, 1000),
+                StockBar("005930", start + timedelta(minutes=5), 101.0, 102.0, 100.8, 102.0, 1100),
+                StockBar("005930", start + timedelta(minutes=10), 102.0, 103.2, 101.8, 103.0, 1200),
+                StockBar("005930", start + timedelta(minutes=15), 103.0, 104.5, 102.8, 104.2, 1500),
+            ]
+            client = FakeDomesticOrderClient()
+
+            trader._evaluate(client, start + timedelta(minutes=16))
+
+            self.assertEqual(len(client.orders), 1)
+            self.assertEqual(client.orders[0]["side"], "buy")
+            self.assertEqual(trader.position["symbol"], "005930")
+            self.assertEqual(trader.snapshot()["orders"], 1)
+            self.assertIn("live_momentum_entry", trader.snapshot()["trade_message"])
+
+    def test_live_direct_exit_sells_direct_position_on_stop(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = replace(StockScannerConfig(), initial_capital=1_000_000, stop_loss_pct=0.01)
+            trader = LiveTrader(
+                LiveConfig(mode="live", account_no="12345678"),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            now = datetime(2026, 4, 30, 10, 0)
+            trader.position = {"symbol": "005930", "shares": 10, "entry_price": 100.0, "highest_price": 100.0}
+            trader.bars = [StockBar("005930", now, 99.0, 99.0, 98.5, 98.8, 1000)]
+            client = FakeDomesticOrderClient()
+
+            sold = trader._try_live_direct_exit(client, now, strategy)
+
+            self.assertTrue(sold)
+            self.assertEqual(client.orders[0]["side"], "sell")
+            self.assertIsNone(trader.position)
+            self.assertIn("live_stop_loss", trader.snapshot()["trade_message"])
+
 
 class FakeOverseasRankClient:
     def overseas_trade_value_rank(self, **kwargs):
@@ -327,6 +387,15 @@ class EmptyOverseasRankClient:
 
     def overseas_volume_power_rank(self, **kwargs):
         return {"output2": []}
+
+
+class FakeDomesticOrderClient:
+    def __init__(self):
+        self.orders = []
+
+    def order_cash(self, **kwargs):
+        self.orders.append(kwargs)
+        return {"rt_cd": "0", "msg1": "정상"}
 
 
 if __name__ == "__main__":

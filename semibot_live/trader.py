@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from semibot_backtester.stock_scanner import StockBar, StockScannerConfig, StockScannerBacktester
+from semibot_backtester.stock_scanner import ScannerTrade, StockBar, StockScannerConfig, StockScannerBacktester
 
 from .kis import KisClient, KisCredentials, parse_overseas_price_response, parse_price_response, parse_rank_rows, rank_row_symbol
 
@@ -541,13 +541,19 @@ class LiveTrader:
         self.seeded_previous_close.add(symbol)
 
     def _evaluate(self, client: KisClient, now: datetime) -> None:
+        strategy = self._active_strategy(now)
+        if self._try_live_direct_exit(client, now, strategy):
+            return
         if len(self.bars) < self.config.min_bars_before_evaluate:
+            if self._try_live_direct_entry(client, now, strategy, {}, []):
+                return
             self._set_trade_message(f"5분봉 데이터 수집 중 ({len(self.bars)}/{self.config.min_bars_before_evaluate})")
             return
-        strategy = self._active_strategy(now)
         result = StockScannerBacktester(strategy).run(self.bars)
         latest_trade = result.trades[-1] if result.trades else None
         if not latest_trade:
+            if self._try_live_direct_entry(client, now, strategy, result.metrics, result.equity_curve):
+                return
             self._set_trade_message(self._entry_wait_message(now))
             _write_live_metrics(result.metrics, self.report_dir)
             return
@@ -562,7 +568,12 @@ class LiveTrader:
             if not _order_succeeded(response, live):
                 self._set_trade_message(f"주문 실패: BUY {latest_trade.symbol} ({_order_message(response)})")
                 return
-            self.position = {"symbol": latest_trade.symbol, "shares": latest_trade.shares, "entry_price": latest_trade.price}
+            self.position = {
+                "symbol": latest_trade.symbol,
+                "shares": latest_trade.shares,
+                "entry_price": latest_trade.price,
+                "highest_price": latest_trade.price,
+            }
         else:
             response = self._place_order(client, "sell", latest_trade.symbol, latest_trade.shares, live, latest_trade.price)
             if not _order_succeeded(response, live):
@@ -576,6 +587,152 @@ class LiveTrader:
         with self.lock:
             self.status["orders"] = int(self.status.get("orders", 0)) + 1
             self.status["trade_message"] = f"최근 주문: {latest_trade.action} {latest_trade.symbol} {latest_trade.shares}주 ({latest_trade.reason})"
+
+    def _try_live_direct_entry(
+        self,
+        client: KisClient,
+        now: datetime,
+        strategy: StockScannerConfig,
+        metrics: dict[str, Any],
+        equity_curve: list[dict[str, Any]],
+    ) -> bool:
+        if self.config.mode != "live" or self.position or now.time() >= strategy.force_exit_clock:
+            return False
+        candidates = [
+            candidate
+            for symbol in self.active_symbols
+            if (candidate := self._live_direct_entry_candidate(symbol, now, strategy)) is not None
+        ]
+        if not candidates:
+            return False
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        _, bar, reason = candidates[0]
+        shares = _live_order_shares(self.cash, bar.close, strategy)
+        if shares <= 0:
+            self._set_trade_message(f"{bar.symbol}: 주문 가능 수량 없음")
+            return False
+        response = self._place_order(client, "buy", bar.symbol, shares, live=True, price=bar.close)
+        if not _order_succeeded(response, True):
+            self._set_trade_message(f"주문 실패: BUY {bar.symbol} ({_order_message(response)})")
+            return False
+        gross = shares * bar.close
+        cost = gross * strategy.commission_rate
+        self.cash = round(max(0.0, self.cash - gross - cost), 2)
+        self.position = {"symbol": bar.symbol, "shares": shares, "entry_price": bar.close, "highest_price": bar.close}
+        trade = ScannerTrade(
+            timestamp=now,
+            action="BUY",
+            symbol=bar.symbol,
+            shares=shares,
+            price=round(bar.close, 4),
+            gross=round(gross, 2),
+            cost=round(cost, 2),
+            realized_pnl=0.0,
+            cash_after=round(self.cash, 2),
+            reason=reason,
+        )
+        trade_key = f"{trade.timestamp}|{trade.action}|{trade.symbol}|{trade.shares}|{trade.reason}"
+        _append_live_trade(trade, response, self.config.mode, trade_key, self.report_dir)
+        if equity_curve:
+            _write_live_equity(equity_curve, self.report_dir)
+        if metrics:
+            _write_live_metrics(metrics, self.report_dir)
+        with self.lock:
+            self.status["orders"] = int(self.status.get("orders", 0)) + 1
+            self.status["trade_message"] = f"최근 주문: BUY {trade.symbol} {trade.shares}주 ({trade.reason})"
+        return True
+
+    def _try_live_direct_exit(self, client: KisClient, now: datetime, strategy: StockScannerConfig) -> bool:
+        if self.config.mode != "live" or not self.position:
+            return False
+        symbol = str(self.position.get("symbol") or "")
+        shares = int(self.position.get("shares") or 0)
+        entry_price = float(self.position.get("entry_price") or 0.0)
+        if not symbol or shares <= 0 or entry_price <= 0:
+            return False
+        latest = _latest_symbol_bar(self.bars, symbol, now.date())
+        if not latest:
+            return False
+        highest_price = max(float(self.position.get("highest_price") or entry_price), latest.close)
+        self.position["highest_price"] = highest_price
+        reason = ""
+        if now.time() >= strategy.force_exit_clock:
+            reason = "live_force_exit"
+        elif latest.close <= entry_price * (1.0 - strategy.stop_loss_pct):
+            reason = "live_stop_loss"
+        elif latest.close >= entry_price * (1.0 + strategy.take_profit_pct):
+            reason = "live_take_profit"
+        elif highest_price > entry_price and latest.close <= highest_price * (1.0 - strategy.trailing_stop_pct):
+            reason = "live_trailing_stop"
+        if not reason:
+            return False
+        response = self._place_order(client, "sell", symbol, shares, live=True, price=latest.close)
+        if not _order_succeeded(response, True):
+            self._set_trade_message(f"주문 실패: SELL {symbol} ({_order_message(response)})")
+            return False
+        gross = shares * latest.close
+        cost = gross * (strategy.commission_rate + strategy.sell_tax_rate)
+        realized_pnl = gross - cost - (entry_price * shares)
+        self.cash = round(self.cash + gross - cost, 2)
+        self.position = None
+        trade = ScannerTrade(
+            timestamp=now,
+            action="SELL_ALL",
+            symbol=symbol,
+            shares=shares,
+            price=round(latest.close, 4),
+            gross=round(gross, 2),
+            cost=round(cost, 2),
+            realized_pnl=round(realized_pnl, 2),
+            cash_after=round(self.cash, 2),
+            reason=reason,
+        )
+        trade_key = f"{trade.timestamp}|{trade.action}|{trade.symbol}|{trade.shares}|{trade.reason}"
+        _append_live_trade(trade, response, self.config.mode, trade_key, self.report_dir)
+        with self.lock:
+            self.status["orders"] = int(self.status.get("orders", 0)) + 1
+            self.status["trade_message"] = f"최근 주문: SELL {trade.symbol} {trade.shares}주 ({trade.reason})"
+        return True
+
+    def _live_direct_entry_candidate(
+        self,
+        symbol: str,
+        now: datetime,
+        strategy: StockScannerConfig,
+    ) -> tuple[float, StockBar, str] | None:
+        symbol_bars = sorted((bar for bar in self.bars if bar.symbol == symbol), key=lambda bar: bar.timestamp)
+        current_bars = [bar for bar in symbol_bars if bar.session == now.date()]
+        if len(current_bars) < 3:
+            return None
+        latest = current_bars[-1]
+        previous_close = _previous_close_for(symbol_bars, latest)
+        if previous_close <= 0:
+            return None
+        session_start = current_bars[0].timestamp
+        if latest.timestamp < session_start + timedelta(minutes=strategy.observation_minutes):
+            return None
+        setup_move = (latest.close / previous_close) - 1.0
+        if not (strategy.gap_min_pct <= setup_move <= strategy.gap_max_pct):
+            return None
+        if latest.volume <= 0:
+            return None
+        previous_volumes = [float(bar.volume) for bar in current_bars[:-1] if bar.volume > 0]
+        volume_avg = sum(previous_volumes[-strategy.volume_sma :]) / min(len(previous_volumes), strategy.volume_sma) if previous_volumes else 0.0
+        volume_ratio = latest.volume / volume_avg if volume_avg else 1.0
+        if volume_ratio < min(0.8, strategy.volume_factor):
+            return None
+        vwap = _latest_vwap(current_bars)
+        if vwap > 0 and latest.close < vwap * 0.995:
+            return None
+        lookback = current_bars[max(0, len(current_bars) - 4)]
+        if latest.close <= lookback.close * 1.001:
+            return None
+        opening_cutoff = session_start + timedelta(minutes=strategy.observation_minutes)
+        opening_bars = [bar for bar in current_bars if bar.timestamp < opening_cutoff]
+        opening_high = max((bar.high for bar in opening_bars), default=latest.high)
+        breakout_bonus = 1.0 if latest.close > opening_high * (1.0 + strategy.min_edge_rate) else 0.0
+        score = (setup_move * 100.0) + min(volume_ratio, 5.0) + breakout_bonus
+        return score, latest, "live_momentum_entry"
 
     def _set_trade_message(self, message: str) -> None:
         with self.lock:
@@ -1051,6 +1208,23 @@ def _order_succeeded(response: dict[str, Any], live: bool) -> bool:
 
 def _order_message(response: dict[str, Any]) -> str:
     return str(response.get("msg1") or response.get("msg_cd") or response)
+
+
+def _live_order_shares(cash: float, price: float, strategy: StockScannerConfig) -> int:
+    if cash <= 0 or price <= 0:
+        return 0
+    risk_budget = cash * strategy.risk_per_trade_pct
+    risk_cap = risk_budget / strategy.stop_loss_pct if strategy.stop_loss_pct > 0 else cash
+    position_cap = cash * strategy.max_position_pct
+    budget = min(cash, risk_cap, position_cap)
+    cost_per_share = price * (1.0 + strategy.commission_rate + strategy.slippage_rate)
+    return math.floor(budget / cost_per_share) if cost_per_share > 0 else 0
+
+
+def _latest_symbol_bar(bars: list[StockBar], symbol: str, session: object) -> StockBar | None:
+    symbol = str(symbol)
+    matching = [bar for bar in bars if bar.symbol == symbol and bar.session == session]
+    return max(matching, key=lambda bar: bar.timestamp) if matching else None
 
 
 def _first_row_float(row: dict[str, Any], keys: tuple[str, ...]) -> float:
