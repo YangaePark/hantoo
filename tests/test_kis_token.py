@@ -102,6 +102,69 @@ class KisTokenTests(unittest.TestCase):
         self.assertEqual(parsed["total_evaluation"], 1_416_000)
         self.assertEqual(parsed["holdings"][0]["symbol"], "005930")
 
+    def test_overseas_price_response_is_parsed(self):
+        from semibot_live.kis import parse_overseas_price_response
+
+        parsed = parse_overseas_price_response(
+            {
+                "output": {
+                    "last": "171.25",
+                    "open": "170.00",
+                    "high": "172.00",
+                    "low": "169.50",
+                    "tvol": "12345",
+                    "tamt": "2111111.25",
+                    "base": "168.00",
+                }
+            }
+        )
+
+        self.assertEqual(parsed["price"], 171.25)
+        self.assertEqual(parsed["open"], 170.0)
+        self.assertGreater(parsed["prev_rate_pct"], 0)
+
+    def test_overseas_balance_response_is_parsed(self):
+        from semibot_live.kis import parse_overseas_balance_response
+
+        parsed = parse_overseas_balance_response(
+            {
+                "rt_cd": "0",
+                "msg1": "정상",
+                "output1": [
+                    {
+                        "ovrs_pdno": "AAPL",
+                        "ovrs_item_name": "Apple",
+                        "ovrs_cblc_qty": "2",
+                        "pchs_avg_pric": "150.25",
+                        "now_pric2": "171.25",
+                        "ovrs_stck_evlu_amt": "342.50",
+                        "frcr_evlu_pfls_amt": "42.00",
+                        "evlu_pfls_rt": "13.98",
+                    }
+                ],
+                "output2": {
+                    "frcr_dncl_amt_2": "5000.00",
+                    "frcr_drwg_psbl_amt_1": "4500.00",
+                    "tot_evlu_amt": "5342.50",
+                    "ovrs_stck_evlu_amt": "342.50",
+                    "tot_evlu_pfls_amt": "42.00",
+                    "tot_pftrt": "0.79",
+                },
+            }
+        )
+
+        self.assertEqual(parsed["cash"], 5000)
+        self.assertEqual(parsed["withdrawable_cash"], 4500)
+        self.assertEqual(parsed["holdings"][0]["symbol"], "AAPL")
+
+    def test_overseas_rank_rows_and_symbols_are_parsed(self):
+        from semibot_live.kis import parse_rank_rows, rank_row_symbol
+
+        rows = parse_rank_rows({"output1": {"summary": "x"}, "output2": [{"symb": "AAPL"}, {"rsym": "DNASTSLA"}]})
+
+        self.assertEqual(rank_row_symbol(rows[1]), "AAPL")
+        self.assertEqual(rank_row_symbol(rows[2]), "DNASTSLA")
+
     def test_balance_max_seed_uses_larger_cash_value(self):
         from semibot_web.server import balance_max_seed
 

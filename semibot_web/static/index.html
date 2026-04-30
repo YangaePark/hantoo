@@ -17,6 +17,10 @@
         <select id="reportSelect"></select>
       </label>
       <button id="refreshButton" class="primary">새로고침</button>
+      <div class="market-tabs" role="tablist" aria-label="자동매매 시장">
+        <button type="button" class="active" data-market-tab="domestic" role="tab" aria-selected="true">국내</button>
+        <button type="button" data-market-tab="overseas" role="tab" aria-selected="false">해외</button>
+      </div>
       <section class="keys">
         <h2>한국투자 API</h2>
         <p id="keyStatus">확인 중</p>
@@ -39,6 +43,15 @@
         </label>
         <input id="accountNo" placeholder="계좌번호 앞 8자리" autocomplete="off" />
         <input id="productCode" placeholder="상품코드 예: 01" autocomplete="off" />
+        <div class="overseas-grid overseas-only" hidden>
+          <input id="exchangeCode" placeholder="주문 거래소 예: NASD" autocomplete="off" />
+          <input id="priceExchangeCode" placeholder="시세 거래소 예: NAS" autocomplete="off" />
+          <input id="currency" placeholder="통화 예: USD" autocomplete="off" />
+        </div>
+        <label class="check-row overseas-only" hidden>
+          <input id="overseasPremarketEnabled" type="checkbox" />
+          <span>프리장 자동선별 포함</span>
+        </label>
         <label class="field">
           <span>시드</span>
           <input id="seedCapital" placeholder="예: 1000000" type="number" min="10000" step="10000" inputmode="numeric" />
@@ -53,7 +66,7 @@
         </label>
         <div class="balance-box">
           <div class="balance-head">
-            <span>실계좌 잔고</span>
+            <span id="balanceTitle">실계좌 잔고</span>
             <button id="refreshBalanceButton" type="button">잔고 새로고침</button>
           </div>
           <p id="balanceStatus">계좌 설정 저장 후 조회</p>

@@ -2,9 +2,14 @@ const state = {
   reports: [],
   current: null,
   liveTimer: null,
+  activeMarket: "domestic",
 };
 
 const $ = (id) => document.getElementById(id);
+const markets = {
+  domestic: { label: "국내", report: "live_trading", currency: "KRW" },
+  overseas: { label: "해외", report: "live_trading_overseas", currency: "USD" },
+};
 
 async function getJSON(url, options) {
   const response = await fetch(url, options);
@@ -13,15 +18,18 @@ async function getJSON(url, options) {
   return data;
 }
 
-function money(value) {
+function money(value, currency = "KRW") {
   const number = Number(value || 0);
-  return `${number.toLocaleString("ko-KR", { maximumFractionDigits: 0 })}원`;
+  if (currency === "KRW") {
+    return `${number.toLocaleString("ko-KR", { maximumFractionDigits: 0 })}원`;
+  }
+  return `${number.toLocaleString("ko-KR", { maximumFractionDigits: 2 })} ${currency}`;
 }
 
-function signedMoney(value) {
+function signedMoney(value, currency = "KRW") {
   const number = Number(value || 0);
   const sign = number > 0 ? "+" : "";
-  return `${sign}${money(number)}`;
+  return `${sign}${money(number, currency)}`;
 }
 
 function pct(value) {
@@ -46,6 +54,10 @@ async function loadReports() {
     select.appendChild(option);
   }
   if (state.reports.length) {
+    const preferred = markets[state.activeMarket].report;
+    if (state.reports.some((report) => report.name === preferred)) {
+      select.value = preferred;
+    }
     await loadReport(select.value || state.reports[0].name);
   }
 }
@@ -59,16 +71,17 @@ async function loadReport(name) {
 function renderReport(report) {
   const metrics = report.metrics || {};
   const current = report.current || {};
+  const currency = report.name === markets.overseas.report ? marketCurrency("overseas") : "KRW";
   $("reportTitle").textContent = report.label || report.name;
-  $("metricEquity").textContent = money(metrics.final_equity);
+  $("metricEquity").textContent = money(metrics.final_equity, currency);
   $("metricReturn").innerHTML = pct(metrics.total_return_pct);
   $("metricDrawdown").innerHTML = pct(metrics.max_drawdown_pct);
   $("metricTrades").textContent = number(metrics.trades);
   $("metricWinRate").innerHTML = pct(metrics.sell_win_rate_pct);
-  $("metricCost").textContent = money(metrics.explicit_trade_cost);
+  $("metricCost").textContent = money(metrics.explicit_trade_cost, currency);
   $("currentStatus").innerHTML = [
     `기준: ${current.time || "-"}`,
-    `현금: ${money(current.cash)}`,
+    `현금: ${money(current.cash, currency)}`,
     current.open_symbol ? `보유: ${current.open_symbol} ${current.open_shares}주` : "보유: 없음",
   ].join("<br />");
 
@@ -194,21 +207,22 @@ function drawScale(ctx, min, max, width, height) {
 }
 
 async function loadKeyStatus() {
-  const status = await getJSON("/api/kis/keys");
+  const status = await getJSON(apiPath("/api/kis/keys"));
   $("keyStatus").textContent = status.configured
-    ? `저장됨: ${status.app_key_masked}${status.token_configured ? " / 토큰 있음" : " / 토큰 없음"}`
-    : "저장된 키 없음";
+    ? `${marketLabel()} 저장됨: ${status.app_key_masked}${status.token_configured ? " / 토큰 있음" : " / 토큰 없음"}`
+    : `${marketLabel()} 저장된 키 없음`;
   $("baseUrl").value = status.base_url || "https://openapi.koreainvestment.com:9443";
 }
 
 async function saveKeys() {
   const payload = {
+    market: state.activeMarket,
     app_key: $("appKey").value,
     app_secret: $("appSecret").value,
     access_token: $("accessToken").value,
     base_url: $("baseUrl").value || "https://openapi.koreainvestment.com:9443",
   };
-  const status = await getJSON("/api/kis/keys", {
+  const status = await getJSON(apiPath("/api/kis/keys"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
@@ -216,17 +230,22 @@ async function saveKeys() {
   $("appKey").value = "";
   $("appSecret").value = "";
   $("accessToken").value = "";
-  $("keyStatus").textContent = `저장됨: ${status.app_key_masked}${status.token_configured ? " / 토큰 있음" : " / 토큰 없음"}`;
+  $("keyStatus").textContent = `${marketLabel()} 저장됨: ${status.app_key_masked}${status.token_configured ? " / 토큰 있음" : " / 토큰 없음"}`;
 }
 
 async function loadLiveConfig() {
-  const config = await getJSON("/api/live/config");
+  const config = await getJSON(apiPath("/api/live/config"));
   $("liveMode").value = config.mode || "paper";
   $("accountNo").value = config.account_no || "";
   $("productCode").value = config.product_code || "01";
+  $("exchangeCode").value = config.exchange_code || "NASD";
+  $("priceExchangeCode").value = config.price_exchange_code || "NAS";
+  $("currency").value = config.currency || markets[state.activeMarket].currency;
+  $("overseasPremarketEnabled").checked = Boolean(config.overseas_premarket_enabled);
   $("seedCapital").value = Math.round(Number(config.seed_capital || 1000000));
   $("seedBalanceMax").checked = config.seed_source === "balance_max";
   $("autoStartTrading").checked = Boolean(config.auto_start);
+  renderMarketFields();
   updateSeedInputState();
 }
 
@@ -236,9 +255,14 @@ function liveConfigPayload() {
     throw new Error("시드는 0보다 큰 금액으로 입력하세요.");
   }
   return {
+    market: state.activeMarket,
     mode: $("liveMode").value,
     account_no: $("accountNo").value.trim(),
     product_code: $("productCode").value.trim() || "01",
+    exchange_code: $("exchangeCode").value.trim().toUpperCase() || "NASD",
+    price_exchange_code: $("priceExchangeCode").value.trim().toUpperCase() || "NAS",
+    currency: $("currency").value.trim().toUpperCase() || markets[state.activeMarket].currency,
+    overseas_premarket_enabled: $("overseasPremarketEnabled").checked,
     seed_capital: seed,
     seed_source: $("seedBalanceMax").checked ? "balance_max" : "manual",
     auto_start: $("autoStartTrading").checked,
@@ -248,32 +272,36 @@ function liveConfigPayload() {
 
 async function saveLiveConfig(confirmAutoStart = true) {
   if (confirmAutoStart && $("liveMode").value === "live" && $("autoStartTrading").checked) {
-    const ok = confirm("실전 주문 모드에서 자동시작을 켜면 NAS 재부팅이나 컨테이너 재시작 후 조건 충족 시 실제 주문이 전송될 수 있습니다. 저장할까요?");
+    const ok = confirm(`${marketLabel()} 실전 주문 모드에서 자동시작을 켜면 NAS 재부팅이나 컨테이너 재시작 후 조건 충족 시 실제 주문이 전송될 수 있습니다. 저장할까요?`);
     if (!ok) return null;
   }
-  const config = await getJSON("/api/live/config", {
+  const config = await getJSON(apiPath("/api/live/config"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(liveConfigPayload()),
   });
-  const seedText = config.seed_source === "balance_max" ? `잔고 최대 사용 (${money(config.seed_capital)} 예비값)` : money(config.seed_capital);
-  $("liveStatus").textContent = `설정 저장됨: ${config.mode}, 시드 ${seedText}, 자동시작 ${config.auto_start ? "켜짐" : "꺼짐"}, 시장 자동선별`;
+  const seedText = config.seed_source === "balance_max" ? `잔고 최대 사용 (${marketMoney(config.seed_capital)} 예비값)` : marketMoney(config.seed_capital);
+  const target = state.activeMarket === "overseas"
+    ? `${config.overseas_premarket_enabled ? "프리장 포함 " : ""}NASDAQ 자동선별`
+    : "시장 자동선별";
+  $("liveStatus").textContent = `${marketLabel()} 설정 저장됨: ${config.mode}, 시드 ${seedText}, 자동시작 ${config.auto_start ? "켜짐" : "꺼짐"}, ${target}`;
   return config;
 }
 
 async function loadLiveStatus() {
-  const status = await getJSON("/api/live/status");
+  const status = await getJSON(apiPath("/api/live/status"));
   const position = status.position || {};
   const activeSymbols = status.active_symbols || [];
   const pieces = [
-    status.running ? "실행 중" : "대기 중",
+    `${marketLabel()} ${status.running ? "실행 중" : "대기 중"}`,
     `모드: ${status.mode || $("liveMode").value || "paper"}`,
-    `시드: ${status.seed_source === "balance_max" ? "잔고 최대 " : ""}${money(status.seed_capital || $("seedCapital").value || 0)}`,
+    `시드: ${status.seed_source === "balance_max" ? "잔고 최대 " : ""}${marketMoney(status.seed_capital || $("seedCapital").value || 0)}`,
     `자동시작: ${status.auto_start ? "켜짐" : "꺼짐"}`,
     `선별: ${status.selector_message || status.selector || "-"}`,
     `추적: ${activeSymbols.length}종목`,
     `주문기록: ${Number(status.orders || 0).toLocaleString("ko-KR")}건`,
   ];
+  if (status.session_label) pieces.push(`세션: ${status.session_label}`);
   if (status.last_tick) pieces.push(`최근: ${status.last_tick}`);
   if (position.symbol) pieces.push(`보유: ${position.symbol} ${position.shares}주`);
   if (status.last_error) pieces.push(`오류: ${status.last_error}`);
@@ -287,10 +315,14 @@ async function startLive() {
   if (!saved) return;
   const mode = $("liveMode").value;
   if (mode === "live") {
-    const ok = confirm("실전 주문 모드입니다. 조건 충족 시 실제 매수/매도 주문이 전송됩니다. 시작할까요?");
+    const ok = confirm(`${marketLabel()} 실전 주문 모드입니다. 조건 충족 시 실제 매수/매도 주문이 전송됩니다. 시작할까요?`);
     if (!ok) return;
   }
-  const status = await getJSON("/api/live/start", { method: "POST" });
+  const status = await getJSON(apiPath("/api/live/start"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ market: state.activeMarket }),
+  });
   if (!status.running && status.message) {
     $("liveStatus").textContent = status.message;
   } else {
@@ -300,13 +332,17 @@ async function startLive() {
 }
 
 async function stopLive() {
-  await getJSON("/api/live/stop", { method: "POST" });
+  await getJSON(apiPath("/api/live/stop"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ market: state.activeMarket }),
+  });
   await loadLiveStatus();
 }
 
 async function refreshBalance() {
   $("balanceStatus").textContent = "조회 중...";
-  const data = await getJSON("/api/kis/balance", { cache: "no-store" });
+  const data = await getJSON(apiPath("/api/kis/balance"), { cache: "no-store" });
   renderBalance(data);
 }
 
@@ -315,15 +351,16 @@ function renderBalance(data) {
     $("balanceStatus").textContent = data.message || "잔고 조회 실패";
     return;
   }
-  $("balanceStatus").textContent = `${data.account_no_masked || "-"}-${data.product_code || "01"} / ${data.fetched_at || ""}`;
-  $("balanceCash").textContent = money(data.cash);
-  $("balanceWithdrawable").textContent = money(data.withdrawable_cash);
-  $("balanceTotal").textContent = money(data.total_evaluation);
+  const suffix = state.activeMarket === "overseas" ? ` / ${data.exchange_code || "-"} ${data.currency || marketCurrency()}` : "";
+  $("balanceStatus").textContent = `${data.account_no_masked || "-"}-${data.product_code || "01"}${suffix} / ${data.fetched_at || ""}`;
+  $("balanceCash").textContent = marketMoney(data.cash);
+  $("balanceWithdrawable").textContent = marketMoney(data.withdrawable_cash);
+  $("balanceTotal").textContent = marketMoney(data.total_evaluation);
   if ($("seedBalanceMax").checked && Number(data.max_seed_capital || 0) > 0) {
     $("seedCapital").value = Math.round(Number(data.max_seed_capital));
   }
   const pnl = Number(data.profit_loss || 0);
-  $("balancePnl").textContent = signedMoney(pnl);
+  $("balancePnl").textContent = signedMoney(pnl, marketCurrency());
   $("balancePnl").className = pnl >= 0 ? "good" : "bad";
 }
 
@@ -333,12 +370,54 @@ function updateSeedInputState() {
   $("seedCapital").title = usingBalance ? "자동매매 시작 시 최신 잔고를 조회해 시드로 사용합니다." : "";
 }
 
+function apiPath(path) {
+  return `${path}?market=${encodeURIComponent(state.activeMarket)}`;
+}
+
+function marketLabel() {
+  return markets[state.activeMarket].label;
+}
+
+function marketCurrency(market = state.activeMarket) {
+  if (market === "overseas") return ($("currency")?.value || markets.overseas.currency).trim().toUpperCase();
+  return "KRW";
+}
+
+function marketMoney(value) {
+  return money(value, marketCurrency());
+}
+
+function renderMarketFields() {
+  const overseas = state.activeMarket === "overseas";
+  document.querySelectorAll(".overseas-only").forEach((element) => {
+    element.hidden = !overseas;
+  });
+  $("balanceTitle").textContent = overseas ? "해외계좌 잔고" : "실계좌 잔고";
+  $("startLiveButton").textContent = `${marketLabel()} 자동매매 시작`;
+}
+
+async function switchMarket(market) {
+  state.activeMarket = market;
+  document.querySelectorAll("[data-market-tab]").forEach((button) => {
+    const active = button.dataset.marketTab === market;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  renderMarketFields();
+  await Promise.all([loadKeyStatus(), loadLiveConfig(), loadLiveStatus(), loadReports()]);
+}
+
 window.addEventListener("resize", () => {
   if (state.current) renderReport(state.current);
 });
 
 $("reportSelect").addEventListener("change", (event) => loadReport(event.target.value));
 $("refreshButton").addEventListener("click", loadReports);
+document.querySelectorAll("[data-market-tab]").forEach((button) => {
+  button.addEventListener("click", () => {
+    switchMarket(button.dataset.marketTab).catch((error) => alert(error.message));
+  });
+});
 $("saveKeysButton").addEventListener("click", () => {
   saveKeys().catch((error) => alert(error.message));
 });
@@ -367,6 +446,7 @@ $("seedBalanceMax").addEventListener("change", () => {
   }
 });
 
+renderMarketFields();
 Promise.all([loadReports(), loadKeyStatus(), loadLiveConfig(), loadLiveStatus()]).catch((error) => {
   console.error(error);
   alert(error.message);

@@ -14,6 +14,7 @@ def main() -> int:
     parser.add_argument("--csv", required=True, help="Multi-symbol intraday OHLCV CSV path")
     parser.add_argument("--config", default="config/volatile_stock_scalp.json", help="Strategy JSON config path")
     parser.add_argument("--out", default=None, help="Output directory")
+    parser.add_argument("--currency", default="KRW", help="Display currency label, e.g. KRW or USD")
     args = parser.parse_args()
 
     config = StockScannerConfig.from_dict(json.loads(Path(args.config).read_text(encoding="utf-8")))
@@ -21,7 +22,7 @@ def main() -> int:
 
     if args.out:
         write_result(result, args.out)
-    print(format_metrics(result.metrics))
+    print(format_metrics(result.metrics, args.currency.upper()))
     return 0
 
 
@@ -46,20 +47,20 @@ def write_result(result, output_dir: str | Path) -> None:
         writer.writerows(result.equity_curve)
 
 
-def format_metrics(metrics: dict[str, object]) -> str:
+def format_metrics(metrics: dict[str, object], currency: str = "KRW") -> str:
     lines = [
         f"strategy: {metrics['strategy']}",
         f"symbols: {metrics['symbols']}",
         f"period: {metrics['start_datetime']} ~ {metrics['end_datetime']}",
         f"sessions: {metrics['sessions']}",
-        f"final equity: {metrics['final_equity']:,} KRW",
+        f"final equity: {metrics['final_equity']:,} {currency}",
         f"total return: {metrics['total_return_pct']}%",
         f"max drawdown: {metrics['max_drawdown_pct']}%",
         f"sharpe approx: {metrics['sharpe_approx']}",
         f"trades: {metrics['trades']}",
         f"sell win rate: {metrics['sell_win_rate_pct']}%",
-        f"realized pnl: {metrics['realized_pnl']:,} KRW",
-        f"explicit trade cost: {metrics['explicit_trade_cost']:,} KRW",
+        f"realized pnl: {metrics['realized_pnl']:,} {currency}",
+        f"explicit trade cost: {metrics['explicit_trade_cost']:,} {currency}",
         f"round trip cost: {metrics['round_trip_cost_pct']}%",
         f"exposure: {metrics['exposure_pct']}%",
     ]

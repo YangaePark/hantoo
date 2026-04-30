@@ -13,6 +13,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -99,6 +103,28 @@ button.danger {
   border-top: 1px solid rgba(255, 255, 255, 0.15);
 }
 
+.market-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.market-tabs button {
+  min-height: 34px;
+  border-radius: 6px;
+  background: transparent;
+  color: #aeb8c7;
+}
+
+.market-tabs button.active {
+  background: #f8fbff;
+  color: var(--text);
+}
+
 .keys h2 {
   margin: 0;
   font-size: 15px;
@@ -121,6 +147,16 @@ button.danger {
   width: 18px;
   min-height: 18px;
   margin: 0;
+}
+
+.overseas-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.overseas-grid input:last-child {
+  grid-column: 1 / -1;
 }
 
 .balance-box {
