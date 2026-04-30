@@ -157,6 +157,63 @@ class KisTokenTests(unittest.TestCase):
         self.assertEqual(parsed["withdrawable_cash"], 4500)
         self.assertEqual(parsed["holdings"][0]["symbol"], "AAPL")
 
+    def test_overseas_balance_response_accepts_swapped_outputs(self):
+        from semibot_live.kis import parse_overseas_balance_response
+
+        parsed = parse_overseas_balance_response(
+            {
+                "rt_cd": "0",
+                "msg1": "정상",
+                "output1": {
+                    "frcr_dncl_amt": "3200.00",
+                    "frcr_drwg_psbl_amt": "3000.00",
+                    "tot_asst_amt": "3542.50",
+                },
+                "output2": [
+                    {
+                        "ovrs_pdno": "MSFT",
+                        "ovrs_item_name": "Microsoft",
+                        "ovrs_cblc_qty": "1",
+                        "pchs_avg_pric": "300.00",
+                        "now_pric2": "342.50",
+                        "ovrs_stck_evlu_amt": "342.50",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(parsed["cash"], 3200)
+        self.assertEqual(parsed["withdrawable_cash"], 3000)
+        self.assertEqual(parsed["total_evaluation"], 3542.5)
+        self.assertEqual(parsed["holdings"][0]["symbol"], "MSFT")
+
+    def test_overseas_margin_response_is_parsed_by_currency(self):
+        from semibot_live.kis import parse_overseas_margin_response
+
+        parsed = parse_overseas_margin_response(
+            {
+                "rt_cd": "0",
+                "msg1": "정상",
+                "output": [
+                    {
+                        "crcy_cd": "JPY",
+                        "frcr_dncl_amt": "100000",
+                        "frcr_drwg_psbl_amt": "90000",
+                    },
+                    {
+                        "crcy_cd": "USD",
+                        "frcr_dncl_amt_2": "7000.00",
+                        "frcr_drwg_psbl_amt_1": "6500.00",
+                    },
+                ],
+            },
+            "USD",
+        )
+
+        self.assertEqual(parsed["cash"], 7000)
+        self.assertEqual(parsed["withdrawable_cash"], 6500)
+        self.assertEqual(parsed["total_evaluation"], 7000)
+
     def test_overseas_rank_rows_and_symbols_are_parsed(self):
         from semibot_live.kis import parse_rank_rows, rank_row_symbol
 

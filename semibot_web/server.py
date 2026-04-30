@@ -12,7 +12,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from semibot_backtester.stock_scanner import StockScannerConfig
-from semibot_live.kis import KisClient, KisCredentials, parse_balance_response, parse_overseas_balance_response
+from semibot_live.kis import (
+    KisClient,
+    KisCredentials,
+    parse_balance_response,
+    parse_overseas_balance_response,
+    parse_overseas_margin_response,
+)
 from semibot_live.trader import (
     DEFAULT_MARKET,
     OVERSEAS_MARKET,
@@ -249,18 +255,35 @@ def load_kis_balance(market: str = DEFAULT_MARKET) -> dict:
     if not config.account_no:
         return {"ok": False, "message": "계좌번호를 저장한 뒤 조회하세요."}
     client = KisClient(KisCredentials.from_file(keys_path), credentials_path=keys_path)
-    if market == OVERSEAS_MARKET:
-        response = client.inquire_overseas_balance(
-            config.account_no,
-            config.product_code,
-            exchange_code=config.exchange_code,
-            currency=config.currency,
-            live=True,
-        )
-        parsed = parse_overseas_balance_response(response)
-    else:
-        response = client.inquire_balance(config.account_no, config.product_code, live=True)
-        parsed = parse_balance_response(response)
+    try:
+        if market == OVERSEAS_MARKET:
+            response = client.inquire_overseas_balance(
+                config.account_no,
+                config.product_code,
+                exchange_code=config.exchange_code,
+                currency=config.currency,
+                live=True,
+            )
+            parsed = parse_overseas_balance_response(response)
+            if _overseas_balance_needs_margin_fallback(parsed):
+                margin_response = client.inquire_overseas_margin(config.account_no, config.product_code, live=True)
+                parsed = _merge_overseas_margin(parsed, parse_overseas_margin_response(margin_response, config.currency))
+        else:
+            response = client.inquire_balance(config.account_no, config.product_code, live=True)
+            parsed = parse_balance_response(response)
+    except Exception as exc:
+        parsed = {
+            "rt_cd": "-1",
+            "msg_cd": exc.__class__.__name__,
+            "message": str(exc),
+            "cash": 0,
+            "withdrawable_cash": 0,
+            "total_evaluation": 0,
+            "stock_evaluation": 0,
+            "profit_loss": 0,
+            "profit_loss_rate": 0,
+            "holdings": [],
+        }
     ok = parsed["rt_cd"] in {"0", ""}
     parsed.pop("raw", None)
     max_seed_capital = balance_max_seed(parsed)
@@ -293,6 +316,29 @@ def balance_max_seed(balance: dict) -> float:
     cash = _to_number(balance.get("cash", 0))
     withdrawable_cash = _to_number(balance.get("withdrawable_cash", 0))
     return float(max(cash, withdrawable_cash))
+
+
+def _overseas_balance_needs_margin_fallback(parsed: dict) -> bool:
+    if str(parsed.get("rt_cd", "")) not in {"0", ""}:
+        return False
+    return balance_max_seed(parsed) <= 0
+
+
+def _merge_overseas_margin(balance: dict, margin: dict) -> dict:
+    merged = dict(balance)
+    merged["margin_msg_cd"] = margin.get("msg_cd", "")
+    merged["margin_message"] = margin.get("message", "")
+    if str(margin.get("rt_cd", "")) not in {"0", ""}:
+        if balance_max_seed(merged) <= 0:
+            merged["rt_cd"] = str(margin.get("rt_cd") or "-1")
+            merged["msg_cd"] = margin.get("msg_cd") or "OVERSEAS_MARGIN_FAILED"
+            merged["message"] = f"해외 예수금 조회 실패: {margin.get('message') or '응답 금액을 확인하지 못했습니다.'}"
+        return merged
+    for key in ("cash", "withdrawable_cash", "total_evaluation"):
+        if _to_number(merged.get(key, 0)) == 0 and _to_number(margin.get(key, 0)) != 0:
+            merged[key] = margin[key]
+    merged["margin_checked"] = True
+    return merged
 
 
 def _market_from_query(parsed) -> str:

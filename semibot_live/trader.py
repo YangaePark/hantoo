@@ -180,6 +180,7 @@ class LiveTrader:
         }
         self.bars: list[StockBar] = []
         self.seeded_previous_close: set[str] = set()
+        self.last_cumulative_volume: dict[tuple[str, object], int] = {}
         self.active_symbols: list[str] = []
         self.selected_since: dict[str, float] = {}
         self.last_selection_at = 0.0
@@ -481,33 +482,41 @@ class LiveTrader:
 
     def _add_tick(self, symbol: str, now: datetime, parsed: dict[str, float]) -> None:
         self._seed_previous_close(symbol, now, parsed)
+        price = parsed["price"]
+        volume_delta = self._volume_delta(symbol, now.date(), int(parsed["volume"]))
         minute_bucket = now.replace(minute=(now.minute // self.config.bar_minutes) * self.config.bar_minutes, second=0, microsecond=0)
         existing = next((bar for bar in reversed(self.bars) if bar.symbol == symbol and bar.timestamp == minute_bucket), None)
-        volume = int(parsed["volume"])
         if existing:
             self.bars.remove(existing)
-            volume = max(existing.volume, volume)
             bar = StockBar(
                 symbol=symbol,
                 timestamp=minute_bucket,
                 open=existing.open,
-                high=max(existing.high, parsed["price"]),
-                low=min(existing.low, parsed["price"]),
-                close=parsed["price"],
-                volume=volume,
+                high=max(existing.high, price),
+                low=min(existing.low, price),
+                close=price,
+                volume=existing.volume + volume_delta,
             )
         else:
             bar = StockBar(
                 symbol=symbol,
                 timestamp=minute_bucket,
-                open=parsed["open"] or parsed["price"],
-                high=max(parsed["high"], parsed["price"]),
-                low=min(parsed["low"] or parsed["price"], parsed["price"]),
-                close=parsed["price"],
-                volume=volume,
+                open=price,
+                high=price,
+                low=price,
+                close=price,
+                volume=volume_delta,
             )
         self.bars.append(bar)
         self.bars = self.bars[-5000:]
+
+    def _volume_delta(self, symbol: str, session: object, cumulative_volume: int) -> int:
+        key = (symbol, session)
+        previous = self.last_cumulative_volume.get(key)
+        self.last_cumulative_volume[key] = max(0, cumulative_volume)
+        if previous is None or cumulative_volume < previous:
+            return 0
+        return max(0, cumulative_volume - previous)
 
     def _seed_previous_close(self, symbol: str, now: datetime, parsed: dict[str, float]) -> None:
         if symbol in self.seeded_previous_close:

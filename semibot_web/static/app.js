@@ -348,7 +348,8 @@ async function refreshBalance() {
 
 function renderBalance(data) {
   if (!data.ok) {
-    $("balanceStatus").textContent = data.message || "잔고 조회 실패";
+    $("balanceStatus").textContent = balanceErrorMessage(data);
+    clearBalanceValues();
     return;
   }
   const suffix = state.activeMarket === "overseas" ? ` / ${data.exchange_code || "-"} ${data.currency || marketCurrency()}` : "";
@@ -362,6 +363,19 @@ function renderBalance(data) {
   const pnl = Number(data.profit_loss || 0);
   $("balancePnl").textContent = signedMoney(pnl, marketCurrency());
   $("balancePnl").className = pnl >= 0 ? "good" : "bad";
+}
+
+function clearBalanceValues() {
+  $("balanceCash").textContent = "-";
+  $("balanceWithdrawable").textContent = "-";
+  $("balanceTotal").textContent = "-";
+  $("balancePnl").textContent = "-";
+  $("balancePnl").className = "";
+}
+
+function balanceErrorMessage(data) {
+  const message = data.message || "잔고 조회 실패";
+  return data.msg_cd ? `${data.msg_cd}: ${message}` : message;
 }
 
 function updateSeedInputState() {
@@ -432,7 +446,8 @@ $("stopLiveButton").addEventListener("click", () => {
 });
 $("refreshBalanceButton").addEventListener("click", () => {
   refreshBalance().catch((error) => {
-    $("balanceStatus").textContent = "잔고 조회 실패";
+    $("balanceStatus").textContent = `잔고 조회 실패: ${error.message}`;
+    clearBalanceValues();
     alert(error.message);
   });
 });
@@ -440,7 +455,8 @@ $("seedBalanceMax").addEventListener("change", () => {
   updateSeedInputState();
   if ($("seedBalanceMax").checked) {
     refreshBalance().catch((error) => {
-      $("balanceStatus").textContent = "잔고 조회 실패";
+      $("balanceStatus").textContent = `잔고 조회 실패: ${error.message}`;
+      clearBalanceValues();
       console.error(error);
     });
   }

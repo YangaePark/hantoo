@@ -305,6 +305,17 @@ class KisClient:
             tr_id="TTTS3012R" if live else "VTTS3012R",
         )
 
+    def inquire_overseas_margin(self, account_no: str, product_code: str = "01", *, live: bool = True) -> dict[str, Any]:
+        params = {
+            "CANO": account_no,
+            "ACNT_PRDT_CD": product_code,
+        }
+        return self._request(
+            "GET",
+            f"/uapi/overseas-stock/v1/trading/foreign-margin?{urlencode(params)}",
+            tr_id="TTTC2101R" if live else "VTTC2101R",
+        )
+
     def order_cash(
         self,
         *,
@@ -531,14 +542,16 @@ def parse_balance_response(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def parse_overseas_balance_response(data: dict[str, Any]) -> dict[str, Any]:
-    summary = _first_dict(data.get("output2"))
-    alt_summary = _first_dict(data.get("output3"))
-    holdings = data.get("output1") or []
-    if isinstance(holdings, dict):
-        holdings = [holdings]
+    rows = _output_rows(data, ("output1", "output2", "output3", "output"))
+    holding_rows = [row for row in rows if _looks_like_overseas_holding(row)]
+    if not holding_rows:
+        holding_rows = _dict_rows(data.get("output1"))
+    summary_rows = [row for row in rows if _looks_like_overseas_summary(row)]
+    if not summary_rows:
+        summary_rows = _dict_rows(data.get("output2")) + _dict_rows(data.get("output3"))
 
     parsed_holdings = []
-    for row in holdings:
+    for row in holding_rows:
         if not isinstance(row, dict):
             continue
         quantity = _first_float(row, ("ovrs_cblc_qty", "ord_psbl_qty", "hldg_qty"))
@@ -557,12 +570,27 @@ def parse_overseas_balance_response(data: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    cash = _first_float(summary, ("frcr_dncl_amt_2", "frcr_drwg_psbl_amt_1", "ord_psbl_frcr_amt"))
-    withdrawable_cash = _first_float(summary, ("frcr_drwg_psbl_amt_1", "ord_psbl_frcr_amt", "frcr_dncl_amt_2"))
-    if cash == 0:
-        cash = _first_float(alt_summary, ("frcr_dncl_amt_2", "frcr_drwg_psbl_amt_1", "ord_psbl_frcr_amt"))
-    if withdrawable_cash == 0:
-        withdrawable_cash = _first_float(alt_summary, ("frcr_drwg_psbl_amt_1", "ord_psbl_frcr_amt", "frcr_dncl_amt_2"))
+    cash = _first_float_from_rows(
+        summary_rows,
+        (
+            "frcr_dncl_amt_2",
+            "frcr_dncl_amt",
+            "frcr_drwg_psbl_amt_1",
+            "ord_psbl_frcr_amt",
+            "dnca_tot_amt",
+            "tot_frcr_cblc_smtl",
+        ),
+    )
+    withdrawable_cash = _first_float_from_rows(
+        summary_rows,
+        (
+            "frcr_drwg_psbl_amt_1",
+            "frcr_drwg_psbl_amt",
+            "ord_psbl_frcr_amt",
+            "frcr_dncl_amt_2",
+            "frcr_dncl_amt",
+        ),
+    )
 
     return {
         "rt_cd": str(data.get("rt_cd", "")),
@@ -570,11 +598,61 @@ def parse_overseas_balance_response(data: dict[str, Any]) -> dict[str, Any]:
         "message": data.get("msg1", ""),
         "cash": cash,
         "withdrawable_cash": withdrawable_cash,
-        "total_evaluation": _first_float(summary, ("tot_evlu_amt", "tot_asst_amt", "ovrs_stck_evlu_amt", "frcr_evlu_amt2")),
-        "stock_evaluation": _first_float(summary, ("ovrs_stck_evlu_amt", "frcr_evlu_amt2")),
-        "profit_loss": _first_float(summary, ("tot_evlu_pfls_amt", "ovrs_tot_pfls", "evlu_pfls_smtl_amt")),
-        "profit_loss_rate": _first_float(summary, ("tot_pftrt", "rlzt_erng_rt", "evlu_pfls_rt")),
+        "total_evaluation": _first_float_from_rows(
+            summary_rows,
+            ("tot_evlu_amt", "tot_asst_amt", "nass_amt", "ovrs_stck_evlu_amt", "frcr_evlu_amt2", "frcr_evlu_tota"),
+        ),
+        "stock_evaluation": _first_float_from_rows(summary_rows, ("ovrs_stck_evlu_amt", "frcr_evlu_amt2")),
+        "profit_loss": _first_float_from_rows(summary_rows, ("tot_evlu_pfls_amt", "ovrs_tot_pfls", "evlu_pfls_smtl_amt")),
+        "profit_loss_rate": _first_float_from_rows(summary_rows, ("tot_pftrt", "rlzt_erng_rt", "evlu_pfls_rt")),
         "holdings": parsed_holdings,
+        "raw": data,
+    }
+
+
+def parse_overseas_margin_response(data: dict[str, Any], currency: str = "USD") -> dict[str, Any]:
+    rows = _preferred_currency_rows(_output_rows(data, ("output", "output1", "output2", "output3")), currency)
+    cash = _first_float_from_rows(
+        rows,
+        (
+            "frcr_dncl_amt_2",
+            "frcr_dncl_amt",
+            "frcr_cblc",
+            "frcr_bal",
+            "ord_psbl_frcr_amt",
+            "ovrs_ord_psbl_amt",
+            "frcr_buy_psbl_amt",
+        ),
+    )
+    withdrawable_cash = _first_float_from_rows(
+        rows,
+        (
+            "frcr_drwg_psbl_amt_1",
+            "frcr_drwg_psbl_amt",
+            "ord_psbl_frcr_amt",
+            "ovrs_ord_psbl_amt",
+            "frcr_buy_psbl_amt",
+            "frcr_dncl_amt_2",
+            "frcr_dncl_amt",
+        ),
+    )
+    total_evaluation = _first_float_from_rows(
+        rows,
+        ("tot_evlu_amt", "tot_asst_amt", "frcr_evlu_tota", "frcr_evlu_amt2", "frcr_dncl_amt_2", "frcr_dncl_amt"),
+    )
+    if total_evaluation == 0:
+        total_evaluation = max(cash, withdrawable_cash)
+    return {
+        "rt_cd": str(data.get("rt_cd", "")),
+        "msg_cd": data.get("msg_cd", ""),
+        "message": data.get("msg1", ""),
+        "cash": cash,
+        "withdrawable_cash": withdrawable_cash,
+        "total_evaluation": total_evaluation,
+        "stock_evaluation": 0.0,
+        "profit_loss": 0.0,
+        "profit_loss_rate": 0.0,
+        "holdings": [],
         "raw": data,
     }
 
@@ -686,6 +764,73 @@ def _first_dict(value: object) -> dict[str, Any]:
     if isinstance(value, list):
         return next((item for item in value if isinstance(item, dict)), {})
     return {}
+
+
+def _dict_rows(value: object) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _output_rows(data: dict[str, Any], keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key in keys:
+        rows.extend(_dict_rows(data.get(key)))
+    return rows
+
+
+def _looks_like_overseas_holding(row: dict[str, Any]) -> bool:
+    symbol = str(row.get("ovrs_pdno") or row.get("pdno") or row.get("symb") or "").strip()
+    if not symbol:
+        return False
+    if _first_float(row, ("ovrs_cblc_qty", "ord_psbl_qty", "hldg_qty")) > 0:
+        return True
+    return any(row.get(key) for key in ("ovrs_item_name", "prdt_name", "prdt_abrv_name"))
+
+
+def _looks_like_overseas_summary(row: dict[str, Any]) -> bool:
+    if _looks_like_overseas_holding(row):
+        return False
+    return any(
+        key in row
+        for key in (
+            "frcr_dncl_amt_2",
+            "frcr_dncl_amt",
+            "frcr_drwg_psbl_amt_1",
+            "frcr_drwg_psbl_amt",
+            "ord_psbl_frcr_amt",
+            "tot_evlu_amt",
+            "tot_asst_amt",
+            "nass_amt",
+            "frcr_evlu_tota",
+            "tot_frcr_cblc_smtl",
+        )
+    )
+
+
+def _preferred_currency_rows(rows: list[dict[str, Any]], currency: str = "") -> list[dict[str, Any]]:
+    currency = str(currency or "").strip().upper()
+    if not currency:
+        return rows
+    matches: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    for row in rows:
+        row_currency = str(row.get("crcy_cd") or row.get("tr_crcy_cd") or row.get("TR_CRCY_CD") or "").strip().upper()
+        if row_currency == currency:
+            matches.append(row)
+        else:
+            rest.append(row)
+    return matches + rest
+
+
+def _first_float_from_rows(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> float:
+    for row in rows:
+        number = _first_float(row, keys)
+        if number != 0:
+            return number
+    return 0.0
 
 
 def _first_float(data: dict[str, Any], keys: tuple[str, ...]) -> float:

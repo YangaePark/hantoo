@@ -142,6 +142,39 @@ class LiveConfigTests(unittest.TestCase):
 
         self.assertIn("진입 전 관찰 중 (10/20분)", message)
 
+    def test_add_tick_builds_bars_from_tick_price_and_volume_delta(self):
+        trader = LiveTrader(LiveConfig(), StockScannerConfig())
+        start = datetime(2026, 4, 30, 10, 0)
+
+        trader._add_tick(
+            "005930",
+            start,
+            {"price": 100.0, "open": 95.0, "high": 120.0, "low": 90.0, "volume": 1000, "prev_rate_pct": 3.0},
+        )
+        trader._add_tick(
+            "005930",
+            start + timedelta(minutes=1),
+            {"price": 101.0, "open": 95.0, "high": 120.0, "low": 90.0, "volume": 1300, "prev_rate_pct": 4.0},
+        )
+        trader._add_tick(
+            "005930",
+            start + timedelta(minutes=5),
+            {"price": 102.0, "open": 95.0, "high": 120.0, "low": 90.0, "volume": 1800, "prev_rate_pct": 5.0},
+        )
+
+        current_bars = [bar for bar in trader.bars if bar.session == start.date()]
+
+        self.assertEqual(len(current_bars), 2)
+        self.assertEqual(current_bars[0].open, 100.0)
+        self.assertEqual(current_bars[0].high, 101.0)
+        self.assertEqual(current_bars[0].low, 100.0)
+        self.assertEqual(current_bars[0].close, 101.0)
+        self.assertEqual(current_bars[0].volume, 300)
+        self.assertEqual(current_bars[1].open, 102.0)
+        self.assertEqual(current_bars[1].high, 102.0)
+        self.assertEqual(current_bars[1].low, 102.0)
+        self.assertEqual(current_bars[1].volume, 500)
+
     def test_selected_symbols_are_kept_for_minimum_hold(self):
         config = LiveConfig(max_symbols=3, min_selection_hold_sec=600)
         trader = LiveTrader(config, StockScannerConfig())
