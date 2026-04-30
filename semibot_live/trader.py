@@ -446,8 +446,8 @@ class LiveTrader:
             return False
         if self.market == OVERSEAS_MARKET and price < OVERSEAS_MIN_PRICE:
             return False
-        gap = parsed["prev_rate_pct"] / 100.0
-        if not (strategy.gap_min_pct <= gap <= strategy.gap_max_pct):
+        setup_move = parsed["prev_rate_pct"] / 100.0
+        if not (strategy.gap_min_pct <= setup_move <= strategy.gap_max_pct):
             return False
         day_range = ((parsed["high"] - parsed["low"]) / price) if price else 0.0
         if day_range < strategy.min_atr_pct:
@@ -634,11 +634,11 @@ class LiveTrader:
             elapsed_minutes = max(0, int((latest.timestamp - session_start).total_seconds() // 60))
             return f"진입 전 관찰 중 ({elapsed_minutes}/{strategy.observation_minutes}분)"
 
-        gap = (current_bars[0].open / previous_close) - 1.0
-        if gap < strategy.gap_min_pct:
-            return f"갭 {gap * 100:.1f}% < {strategy.gap_min_pct * 100:.1f}%"
-        if gap > strategy.gap_max_pct:
-            return f"갭 {gap * 100:.1f}% > {strategy.gap_max_pct * 100:.1f}%"
+        setup_move = (latest.close / previous_close) - 1.0
+        if setup_move < strategy.gap_min_pct:
+            return f"상승률 {setup_move * 100:.1f}% < {strategy.gap_min_pct * 100:.1f}%"
+        if setup_move > strategy.gap_max_pct:
+            return f"상승률 {setup_move * 100:.1f}% > {strategy.gap_max_pct * 100:.1f}%"
 
         previous_volumes = [float(bar.volume) for bar in current_bars[:-1]]
         if len(previous_volumes) < strategy.volume_sma:

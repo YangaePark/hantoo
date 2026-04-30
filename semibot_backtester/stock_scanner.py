@@ -347,8 +347,8 @@ class StockScannerBacktester:
         if bar.timestamp < session_start + timedelta(minutes=self.config.observation_minutes):
             return False
 
-        gap = (session_bars[0].open / previous_close) - 1.0
-        if not (self.config.gap_min_pct <= gap <= self.config.gap_max_pct):
+        setup_move = (bar.close / previous_close) - 1.0
+        if not (self.config.gap_min_pct <= setup_move <= self.config.gap_max_pct):
             return False
 
         spread = bar.spread_pct

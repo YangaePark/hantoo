@@ -24,6 +24,25 @@ class StockScannerBacktesterTest(unittest.TestCase):
         self.assertTrue(result.equity_curve)
         self.assertIn("explicit_trade_cost", result.metrics)
 
+    def test_scanner_accepts_intraday_move_after_small_open_gap(self) -> None:
+        config = StockScannerConfig(
+            initial_capital=1_000_000,
+            observation_minutes=10,
+            top_value_rank=1,
+            gap_min_pct=0.02,
+            gap_max_pct=0.08,
+            volume_sma=3,
+            volume_factor=0.8,
+            atr_period=3,
+            min_atr_pct=0.001,
+            max_atr_pct=0.1,
+            max_extension_pct=0.2,
+            vi_proxy_move_pct=0.2,
+        )
+        result = StockScannerBacktester(config).run(intraday_breakout_after_small_open_gap())
+
+        self.assertTrue(any(trade.action == "BUY" for trade in result.trades))
+
 
 def synthetic_bars() -> list[StockBar]:
     bars: list[StockBar] = []
@@ -50,6 +69,27 @@ def synthetic_bars() -> list[StockBar]:
                     )
                 )
             previous[symbol] = price
+    return bars
+
+
+def intraday_breakout_after_small_open_gap() -> list[StockBar]:
+    bars: list[StockBar] = [StockBar("AAA", datetime(2026, 1, 4, 15, 30), 100.0, 100.0, 100.0, 100.0, 1)]
+    start = datetime(2026, 1, 5, 9, 0)
+    prices = [100.4, 101.0, 101.8, 102.4, 103.2, 104.0, 104.8, 105.5]
+    for idx, close in enumerate(prices):
+        ts = start + timedelta(minutes=5 * idx)
+        bars.append(
+            StockBar(
+                "AAA",
+                ts,
+                close * 0.998,
+                close * 1.006,
+                close * 0.994,
+                close,
+                200000 + idx * 10000,
+                spread_pct=0.001,
+            )
+        )
     return bars
 
 

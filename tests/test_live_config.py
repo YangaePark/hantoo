@@ -111,6 +111,22 @@ class LiveConfigTests(unittest.TestCase):
 
         self.assertIn("거래량", message)
 
+    def test_symbol_entry_reason_uses_current_move_not_open_gap(self):
+        strategy = replace(StockScannerConfig(), volume_sma=3, observation_minutes=5, atr_period=3)
+        trader = LiveTrader(LiveConfig(), strategy)
+        start = datetime(2026, 4, 29, 9, 0)
+        trader.bars = [
+            StockBar("005930", start - timedelta(days=1), 100.0, 100.0, 100.0, 100.0, 1),
+            StockBar("005930", start, 100.4, 101.0, 100.0, 100.5, 1000),
+            StockBar("005930", start + timedelta(minutes=5), 100.5, 103.0, 100.5, 102.5, 1000),
+            StockBar("005930", start + timedelta(minutes=10), 102.5, 104.0, 102.0, 103.5, 1000),
+            StockBar("005930", start + timedelta(minutes=15), 103.5, 105.0, 103.0, 104.5, 1000),
+        ]
+
+        message = trader._symbol_entry_reason("005930", start + timedelta(minutes=16))
+
+        self.assertNotIn("갭 0.4%", message)
+
     def test_symbol_entry_reason_shows_observation_progress(self):
         strategy = replace(StockScannerConfig(), observation_minutes=20)
         trader = LiveTrader(LiveConfig(), strategy)
