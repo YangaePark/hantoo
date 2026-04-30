@@ -12,10 +12,15 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from semibot_backtester.stock_scanner import StockScannerConfig
-from semibot_live.kis import KisClient, KisCredentials, parse_balance_response
+from semibot_live.kis import KisClient, KisCredentials, parse_balance_response, parse_overseas_balance_response
 from semibot_live.trader import (
+    DEFAULT_MARKET,
+    OVERSEAS_MARKET,
+    SUPPORTED_MARKETS,
     ensure_live_report,
+    kis_keys_path,
     LiveConfig,
+    live_report_dir,
     live_status,
     load_live_config,
     save_live_config,
@@ -28,8 +33,8 @@ ROOT = Path(__file__).resolve().parents[1]
 STATE_ROOT = Path(os.environ.get("SEMIBOT_STATE_ROOT", ROOT)).resolve()
 WEB_ROOT = ROOT / "semibot_web" / "static"
 REPORTS_ROOT = STATE_ROOT / "reports"
-KIS_KEYS_PATH = STATE_ROOT / "config" / "kis.local.json"
 SCANNER_CONFIG_PATH = ROOT / "config" / "volatile_stock_scalp.json"
+OVERSEAS_SCANNER_CONFIG_PATH = ROOT / "config" / "overseas_stock_scalp.json"
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -49,13 +54,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             name = parse_qs(parsed.query).get("name", [""])[0]
             self._json(load_report(name))
         elif parsed.path == "/api/kis/keys":
-            self._json(load_kis_key_status())
+            self._json(load_kis_key_status(_market_from_query(parsed)))
         elif parsed.path == "/api/kis/balance":
-            self._json(load_kis_balance())
+            self._json(load_kis_balance(_market_from_query(parsed)))
         elif parsed.path == "/api/live/config":
-            self._json(load_live_config().to_dict())
+            self._json(load_live_config(_market_from_query(parsed)).to_dict())
         elif parsed.path == "/api/live/status":
-            self._json(live_status())
+            self._json(live_status(_market_from_query(parsed)))
         else:
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -63,6 +68,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/kis/keys":
             payload = self._read_json()
+            market = _market_from_payload(payload, parsed)
             app_key = str(payload.get("app_key", "")).strip()
             app_secret = str(payload.get("app_secret", "")).strip()
             access_token = str(payload.get("access_token", "")).strip()
@@ -71,8 +77,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not app_key or not app_secret:
                 self._json({"error": "app_key and app_secret are required"}, HTTPStatus.BAD_REQUEST)
                 return
-            KIS_KEYS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            KIS_KEYS_PATH.write_text(
+            keys_path = kis_keys_path(market)
+            keys_path.parent.mkdir(parents=True, exist_ok=True)
+            keys_path.write_text(
                 json.dumps(
                     {
                         "app_key": app_key,
@@ -86,25 +93,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 ),
                 encoding="utf-8",
             )
-            self._json(load_kis_key_status())
+            self._json(load_kis_key_status(market))
         elif parsed.path == "/api/live/config":
             payload = self._read_json()
+            market = _market_from_payload(payload, parsed)
+            payload["market"] = market
             config = LiveConfig.from_dict(payload)
             if config.mode not in {"paper", "live"}:
                 self._json({"error": "mode must be paper or live"}, HTTPStatus.BAD_REQUEST)
                 return
-            save_live_config(config)
+            save_live_config(config, market)
             self._json(config.to_dict())
         elif parsed.path == "/api/live/start":
-            config = load_live_config()
+            payload = self._read_json()
+            market = _market_from_payload(payload, parsed)
+            config = load_live_config(market)
             seed_capital, seed_error = resolve_seed_capital(config)
             if seed_capital <= 0:
                 self._json({"running": False, "message": seed_error or "잔고 최대 시드로 사용할 현금이 없습니다."})
                 return
-            strategy = load_live_strategy_config(seed_capital)
-            self._json(start_live_trader(strategy))
+            strategy = load_live_strategy_config(market, seed_capital)
+            self._json(start_live_trader(strategy, market))
         elif parsed.path == "/api/live/stop":
-            self._json(stop_live_trader())
+            payload = self._read_json()
+            market = _market_from_payload(payload, parsed)
+            self._json(stop_live_trader(market))
         else:
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -205,16 +218,20 @@ def current_snapshot(metrics: dict, trades: list[dict], equity: list[dict]) -> d
     }
 
 
-def load_kis_key_status() -> dict:
-    if not KIS_KEYS_PATH.exists():
+def load_kis_key_status(market: str = DEFAULT_MARKET) -> dict:
+    market = _market(market)
+    keys_path = kis_keys_path(market)
+    if not keys_path.exists():
         return {
+            "market": market,
             "configured": False,
             "token_configured": False,
             "app_key_masked": "",
             "base_url": "https://openapi.koreainvestment.com:9443",
         }
-    data = _read_json_file(KIS_KEYS_PATH)
+    data = _read_json_file(keys_path)
     return {
+        "market": market,
         "configured": bool(data.get("app_key") and data.get("app_secret")),
         "token_configured": bool(data.get("access_token")),
         "token_expires_at": data.get("access_token_expires_at", ""),
@@ -223,24 +240,39 @@ def load_kis_key_status() -> dict:
     }
 
 
-def load_kis_balance() -> dict:
-    if not KIS_KEYS_PATH.exists():
+def load_kis_balance(market: str = DEFAULT_MARKET) -> dict:
+    market = _market(market)
+    keys_path = kis_keys_path(market)
+    if not keys_path.exists():
         return {"ok": False, "message": "KIS 키가 저장되어 있지 않습니다."}
-    config = load_live_config()
+    config = load_live_config(market)
     if not config.account_no:
         return {"ok": False, "message": "계좌번호를 저장한 뒤 조회하세요."}
-    client = KisClient(KisCredentials.from_file(KIS_KEYS_PATH), credentials_path=KIS_KEYS_PATH)
-    response = client.inquire_balance(config.account_no, config.product_code, live=True)
-    parsed = parse_balance_response(response)
+    client = KisClient(KisCredentials.from_file(keys_path), credentials_path=keys_path)
+    if market == OVERSEAS_MARKET:
+        response = client.inquire_overseas_balance(
+            config.account_no,
+            config.product_code,
+            exchange_code=config.exchange_code,
+            currency=config.currency,
+            live=True,
+        )
+        parsed = parse_overseas_balance_response(response)
+    else:
+        response = client.inquire_balance(config.account_no, config.product_code, live=True)
+        parsed = parse_balance_response(response)
     ok = parsed["rt_cd"] in {"0", ""}
     parsed.pop("raw", None)
     max_seed_capital = balance_max_seed(parsed)
     return {
         **parsed,
+        "market": market,
         "ok": ok,
         "max_seed_capital": max_seed_capital,
         "account_no_masked": _mask_account(config.account_no),
         "product_code": config.product_code,
+        "exchange_code": config.exchange_code,
+        "currency": config.currency,
         "fetched_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
     }
 
@@ -248,7 +280,7 @@ def load_kis_balance() -> dict:
 def resolve_seed_capital(config: LiveConfig) -> tuple[float, str]:
     if config.seed_source != "balance_max":
         return config.seed_capital, ""
-    balance = load_kis_balance()
+    balance = load_kis_balance(config.market)
     if not balance.get("ok"):
         return 0.0, str(balance.get("message") or "잔고 조회에 실패했습니다.")
     seed = balance_max_seed(balance)
@@ -263,24 +295,43 @@ def balance_max_seed(balance: dict) -> float:
     return float(max(cash, withdrawable_cash))
 
 
-def load_live_strategy_config(seed_capital: float | None = None) -> StockScannerConfig:
+def _market_from_query(parsed) -> str:
+    return _market(parse_qs(parsed.query).get("market", [DEFAULT_MARKET])[0])
+
+
+def _market_from_payload(payload: dict, parsed) -> str:
+    return _market(payload.get("market") or parse_qs(parsed.query).get("market", [DEFAULT_MARKET])[0])
+
+
+def _market(value: object) -> str:
+    market = str(value or DEFAULT_MARKET).strip().lower()
+    return market if market in SUPPORTED_MARKETS else DEFAULT_MARKET
+
+
+def load_live_strategy_config(market: str = DEFAULT_MARKET, seed_capital: float | None = None) -> StockScannerConfig:
     config = StockScannerConfig()
-    if SCANNER_CONFIG_PATH.exists():
-        config = StockScannerConfig.from_dict(_read_json_file(SCANNER_CONFIG_PATH))
+    path = OVERSEAS_SCANNER_CONFIG_PATH if _market(market) == OVERSEAS_MARKET else SCANNER_CONFIG_PATH
+    if path.exists():
+        config = StockScannerConfig.from_dict(_read_json_file(path))
     if seed_capital and seed_capital > 0:
         return replace(config, initial_capital=seed_capital)
     return config
 
 
-def auto_start_live_trader() -> dict:
-    config = load_live_config()
+def auto_start_live_trader(market: str = DEFAULT_MARKET) -> dict:
+    market = _market(market)
+    config = load_live_config(market)
     if not config.auto_start:
         return {"running": False, "message": "자동시작 꺼짐"}
     seed_capital, seed_error = resolve_seed_capital(config)
     if seed_capital <= 0:
         return {"running": False, "message": seed_error or "자동시작 실패: 시드 금액 없음"}
-    strategy = load_live_strategy_config(seed_capital)
-    return start_live_trader(strategy)
+    strategy = load_live_strategy_config(market, seed_capital)
+    return start_live_trader(strategy, market)
+
+
+def auto_start_live_traders() -> dict[str, dict]:
+    return {market: auto_start_live_trader(market) for market in (DEFAULT_MARKET, OVERSEAS_MARKET)}
 
 
 def _read_json_file(path: Path) -> dict:
@@ -332,14 +383,17 @@ def _report_label(name: str, metrics: dict) -> str:
 
 
 def run(host: str = "127.0.0.1", port: int = 8000) -> None:
-    ensure_live_report()
+    ensure_live_report(live_report_dir(DEFAULT_MARKET), strategy_name="live_volatile_stock_scanner")
+    ensure_live_report(live_report_dir(OVERSEAS_MARKET), strategy_name="live_overseas_stock_scanner")
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     print(f"Dashboard running at http://{host}:{port}")
-    auto_start_status = auto_start_live_trader()
-    if auto_start_status.get("running"):
-        print("[live] 자동매매 자동시작")
-    elif load_live_config().auto_start:
-        print(f"[live] 자동시작 실패: {auto_start_status.get('message', 'unknown')}")
+    auto_start_statuses = auto_start_live_traders()
+    for market, auto_start_status in auto_start_statuses.items():
+        label = "해외" if market == OVERSEAS_MARKET else "국내"
+        if auto_start_status.get("running"):
+            print(f"[live:{market}] {label} 자동매매 자동시작")
+        elif load_live_config(market).auto_start:
+            print(f"[live:{market}] {label} 자동시작 실패: {auto_start_status.get('message', 'unknown')}")
     server.serve_forever()
 
 

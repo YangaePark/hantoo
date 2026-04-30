@@ -1,6 +1,6 @@
 # Hantoo 자동매매 대시보드
 
-한국투자증권 Open API를 이용해 장중 변동성이 큰 국내 주식을 자동 선별하고, 단타 전략을 모의 실행하거나 실전 현금 주문으로 실행하는 Python 웹 앱입니다. 별도 웹 프레임워크 없이 Python 표준 라이브러리만 사용합니다.
+한국투자증권 Open API를 이용해 장중 변동성이 큰 국내 주식과 미국 NASDAQ 주식을 자동 선별하고, 단타 전략을 모의 실행하거나 실전 현금 주문으로 실행하는 Python 웹 앱입니다. 별도 웹 프레임워크 없이 Python 표준 라이브러리만 사용합니다.
 
 수익은 보장되지 않습니다. 반드시 `모의 실행`으로 충분히 확인한 뒤 소액으로만 실전 테스트하세요. 이 앱은 App Secret과 Access Token을 로컬에 저장하므로 공개 인터넷에 그대로 노출하면 안 됩니다.
 
@@ -11,9 +11,11 @@
 - 기본 종목은 수동 입력하지 않습니다. 장중 한국투자 순위 API로 거래대금 상위, 등락률 상위, 거래량 급증, 체결강도 상위 후보를 모읍니다.
 - ETF, ETN, SPAC, 거래정지/투자경고 성격의 종목은 제외하고, 갭 상승과 당일 변동성이 큰 개별주를 우선 추적합니다.
 - 최대 20개 종목을 10초 간격으로 조회하고, 앱 내부에서 5분봉을 만들어 단타 전략을 평가합니다.
-- 자동선별 후보는 5분마다 갱신하고, 한번 선별된 종목은 최소 10분 유지해 5분봉 데이터가 쌓일 시간을 줍니다.
+- 자동선별 후보는 5분마다 갱신하고, 한번 선별된 종목은 최소 30분 유지해 관찰용 5분봉 데이터가 쌓일 시간을 줍니다.
 - `모의 실행`은 주문과 손익을 리포트에만 기록합니다.
 - `실전 주문`은 웹에서 확인을 받은 뒤 한국투자 현금 주문 API로 실제 주문을 보냅니다. 레버리지나 미수 주문은 사용하지 않습니다.
+- 웹의 `국내`/`해외` 탭은 키, 계좌, 전략 설정, 실행 상태, 리포트를 서로 분리해 각각 시작/중지할 수 있습니다.
+- 해외 슬롯은 별도 한국투자 키와 해외계좌를 저장하고, NASDAQ 랭킹 API로 거래대금, 거래량, 상승률, 거래량 급증, 체결강도 후보를 합쳐 자동 선별합니다. 프리장 자동선별은 해외 탭에서 별도로 켤 수 있습니다.
 
 ## 자동선별 기준
 
@@ -35,7 +37,7 @@
 - 강제 청산: `15:15`
 - 비용 가정: 수수료 `1.5bps`, 슬리피지 `8bps`, 매도세 `0bps`
 
-전략값을 바꾸려면 `config/volatile_stock_scalp.json`을 수정하면 됩니다.
+전략값을 바꾸려면 국내는 `config/volatile_stock_scalp.json`, 해외는 `config/overseas_stock_scalp.json`을 수정하면 됩니다.
 
 ## 로컬 실행
 
@@ -60,25 +62,29 @@ PY
 
 ## 웹 사용 순서
 
-1. `한국투자 API` 영역에 App Key, App Secret, Access Token을 입력하고 저장합니다.
-2. `자동매매` 영역에서 먼저 `모의 실행` 모드를 선택합니다.
-3. 계좌번호 앞 8자리, 상품코드 `01`, 자동매매에 사용할 시드를 저장합니다.
-4. 계좌 현금을 전부 시드로 쓰려면 `통장 잔고 최대로 사용`을 켭니다. 이 옵션은 자동매매 시작 시 잔고를 다시 조회해 예수금과 출금가능금액 중 큰 값을 시드로 사용합니다.
-5. NAS 재부팅이나 컨테이너 재시작 후에도 자동으로 감시를 시작하려면 `서버 시작 시 자동매매 자동 시작`을 켭니다.
-6. `잔고 새로고침`을 눌러 현재 실계좌 예수금, 출금가능금액, 총평가금, 손익을 확인합니다.
-7. `자동매매 시작`을 누릅니다.
-8. 상단 리포트에서 `live_trading`을 선택해 현재 상태, 거래 내역, 횟수, 수익률, 자산 그래프를 확인합니다.
-9. 모의 실행 결과가 충분히 쌓인 뒤에만 `실전 주문` 모드로 전환합니다.
+1. `국내` 또는 `해외` 탭을 선택합니다.
+2. `한국투자 API` 영역에 해당 시장용 App Key, App Secret, Access Token을 입력하고 저장합니다.
+3. `자동매매` 영역에서 먼저 `모의 실행` 모드를 선택합니다.
+4. 계좌번호 앞 8자리, 상품코드 `01`, 자동매매에 사용할 시드를 저장합니다. 해외 탭은 NASDAQ 자동선별만 사용하며, 프리장을 포함하려면 `프리장 자동선별 포함`을 켭니다.
+5. 계좌 현금을 전부 시드로 쓰려면 `통장 잔고 최대로 사용`을 켭니다. 이 옵션은 자동매매 시작 시 잔고를 다시 조회해 예수금과 출금가능금액 중 큰 값을 시드로 사용합니다.
+6. NAS 재부팅이나 컨테이너 재시작 후에도 자동으로 감시를 시작하려면 `서버 시작 시 자동매매 자동 시작`을 켭니다.
+7. `잔고 새로고침`을 눌러 현재 실계좌 예수금, 출금가능금액, 총평가금, 손익을 확인합니다.
+8. `자동매매 시작`을 누릅니다.
+9. 상단 리포트에서 국내는 `live_trading`, 해외는 `live_trading_overseas`를 선택해 현재 상태, 거래 내역, 횟수, 수익률, 자산 그래프를 확인합니다.
+10. 모의 실행 결과가 충분히 쌓인 뒤에만 `실전 주문` 모드로 전환합니다.
 
 ## 저장 위치
 
 기본 로컬 실행은 저장소 폴더 아래에 운영 데이터를 저장합니다. Docker나 Synology 배포에서는 `SEMIBOT_STATE_ROOT` 환경변수로 저장 위치를 분리합니다.
 
 - `${SEMIBOT_STATE_ROOT}/config/kis.local.json`: 한국투자 키와 Access Token
+- `${SEMIBOT_STATE_ROOT}/config/kis.overseas.local.json`: 해외 슬롯용 한국투자 키와 Access Token
 - `${SEMIBOT_STATE_ROOT}/config/live.local.json`: 자동매매 설정
+- `${SEMIBOT_STATE_ROOT}/config/live.overseas.local.json`: 해외 자동매매 설정
 - `${SEMIBOT_STATE_ROOT}/reports/live_trading/metrics.json`: 실전/모의 리포트 지표
 - `${SEMIBOT_STATE_ROOT}/reports/live_trading/trades.csv`: 주문 및 거래 기록
 - `${SEMIBOT_STATE_ROOT}/reports/live_trading/equity_curve.csv`: 자산 곡선
+- `${SEMIBOT_STATE_ROOT}/reports/live_trading_overseas/`: 해외 슬롯 리포트
 
 `*.local.json`, `reports/`, `data/`는 Git에 올리지 않도록 제외되어 있습니다.
 
@@ -167,6 +173,18 @@ python3 -m semibot_backtester.stock_scanner_cli \
   --csv data/sample_stock_scanner.csv \
   --config config/volatile_stock_scalp.json \
   --out reports/sample_stock_scanner
+```
+
+NASDAQ 자동선별 스캐너 백테스트:
+
+```bash
+python3 scripts/generate_sample_overseas_stock_scanner_data.py --out data/sample_nasdaq_scanner.csv
+
+python3 -m semibot_backtester.stock_scanner_cli \
+  --csv data/sample_nasdaq_scanner.csv \
+  --config config/overseas_stock_scalp.json \
+  --currency USD \
+  --out reports/sample_nasdaq_scanner
 ```
 
 ETF 일봉 백테스트:

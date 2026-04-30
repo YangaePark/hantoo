@@ -69,6 +69,138 @@ class KisClient:
             tr_id="FHKST01010100",
         )
 
+    def inquire_overseas_price(self, exchange_code: str, symbol: str, auth: str = "") -> dict[str, Any]:
+        params = {
+            "AUTH": auth,
+            "EXCD": exchange_code,
+            "SYMB": symbol,
+        }
+        return self._request(
+            "GET",
+            f"/uapi/overseas-price/v1/quotations/price?{urlencode(params)}",
+            tr_id="HHDFS00000300",
+        )
+
+    def overseas_trade_value_rank(
+        self,
+        *,
+        exchange_code: str = "NAS",
+        days: str = "0",
+        volume_range: str = "4",
+        price_min: str = "5",
+        price_max: str = "",
+        auth: str = "",
+        keyb: str = "",
+    ) -> dict[str, Any]:
+        params = {
+            "EXCD": exchange_code,
+            "NDAY": days,
+            "VOL_RANG": volume_range,
+            "AUTH": auth,
+            "KEYB": keyb,
+            "PRC1": price_min,
+            "PRC2": price_max,
+        }
+        return self._request(
+            "GET",
+            f"/uapi/overseas-stock/v1/ranking/trade-pbmn?{urlencode(params)}",
+            tr_id="HHDFS76320010",
+        )
+
+    def overseas_trade_volume_rank(
+        self,
+        *,
+        exchange_code: str = "NAS",
+        days: str = "0",
+        volume_range: str = "4",
+        price_min: str = "5",
+        price_max: str = "",
+        auth: str = "",
+        keyb: str = "",
+    ) -> dict[str, Any]:
+        params = {
+            "EXCD": exchange_code,
+            "NDAY": days,
+            "VOL_RANG": volume_range,
+            "KEYB": keyb,
+            "AUTH": auth,
+            "PRC1": price_min,
+            "PRC2": price_max,
+        }
+        return self._request(
+            "GET",
+            f"/uapi/overseas-stock/v1/ranking/trade-vol?{urlencode(params)}",
+            tr_id="HHDFS76310010",
+        )
+
+    def overseas_updown_rate_rank(
+        self,
+        *,
+        exchange_code: str = "NAS",
+        days: str = "0",
+        gubn: str = "1",
+        volume_range: str = "4",
+        auth: str = "",
+        keyb: str = "",
+    ) -> dict[str, Any]:
+        params = {
+            "EXCD": exchange_code,
+            "NDAY": days,
+            "GUBN": gubn,
+            "VOL_RANG": volume_range,
+            "AUTH": auth,
+            "KEYB": keyb,
+        }
+        return self._request(
+            "GET",
+            f"/uapi/overseas-stock/v1/ranking/updown-rate?{urlencode(params)}",
+            tr_id="HHDFS76290000",
+        )
+
+    def overseas_volume_surge_rank(
+        self,
+        *,
+        exchange_code: str = "NAS",
+        minutes: str = "4",
+        volume_range: str = "4",
+        keyb: str = "",
+        auth: str = "",
+    ) -> dict[str, Any]:
+        params = {
+            "EXCD": exchange_code,
+            "MINX": minutes,
+            "VOL_RANG": volume_range,
+            "KEYB": keyb,
+            "AUTH": auth,
+        }
+        return self._request(
+            "GET",
+            f"/uapi/overseas-stock/v1/ranking/volume-surge?{urlencode(params)}",
+            tr_id="HHDFS76270000",
+        )
+
+    def overseas_volume_power_rank(
+        self,
+        *,
+        exchange_code: str = "NAS",
+        days: str = "0",
+        volume_range: str = "4",
+        auth: str = "",
+        keyb: str = "",
+    ) -> dict[str, Any]:
+        params = {
+            "EXCD": exchange_code,
+            "NDAY": days,
+            "VOL_RANG": volume_range,
+            "AUTH": auth,
+            "KEYB": keyb,
+        }
+        return self._request(
+            "GET",
+            f"/uapi/overseas-stock/v1/ranking/volume-power?{urlencode(params)}",
+            tr_id="HHDFS76280000",
+        )
+
     def volume_rank(self, *, sort_code: str = "3", min_volume: str = "0") -> dict[str, Any]:
         params = {
             "FID_COND_MRKT_DIV_CODE": "J",
@@ -150,6 +282,29 @@ class KisClient:
             tr_id="TTTC8434R" if live else "VTTC8434R",
         )
 
+    def inquire_overseas_balance(
+        self,
+        account_no: str,
+        product_code: str = "01",
+        *,
+        exchange_code: str = "NASD",
+        currency: str = "USD",
+        live: bool = True,
+    ) -> dict[str, Any]:
+        params = {
+            "CANO": account_no,
+            "ACNT_PRDT_CD": product_code,
+            "OVRS_EXCG_CD": exchange_code,
+            "TR_CRCY_CD": currency,
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": "",
+        }
+        return self._request(
+            "GET",
+            f"/uapi/overseas-stock/v1/trading/inquire-balance?{urlencode(params)}",
+            tr_id="TTTS3012R" if live else "VTTS3012R",
+        )
+
     def order_cash(
         self,
         *,
@@ -172,6 +327,38 @@ class KisClient:
         }
         tr_id = ("TTTC0802U" if side == "buy" else "TTTC0801U") if live else ("VTTC0802U" if side == "buy" else "VTTC0801U")
         return self._request("POST", "/uapi/domestic-stock/v1/trading/order-cash", body=body, tr_id=tr_id, hash_body=True)
+
+    def order_overseas(
+        self,
+        *,
+        account_no: str,
+        product_code: str,
+        exchange_code: str,
+        symbol: str,
+        side: str,
+        quantity: int,
+        price: float,
+        order_division: str = "00",
+        order_server_division: str = "0",
+        live: bool = False,
+    ) -> dict[str, Any]:
+        tr_id = _overseas_order_tr_id(exchange_code, side)
+        if not live:
+            tr_id = "V" + tr_id[1:]
+        body = {
+            "CANO": account_no,
+            "ACNT_PRDT_CD": product_code,
+            "OVRS_EXCG_CD": exchange_code,
+            "PDNO": symbol,
+            "ORD_QTY": str(quantity),
+            "OVRS_ORD_UNPR": _format_overseas_price(price),
+            "CTAC_TLNO": "",
+            "MGCO_APTM_ODNO": "",
+            "SLL_TYPE": "00" if side == "sell" else "",
+            "ORD_SVR_DVSN_CD": order_server_division,
+            "ORD_DVSN": order_division,
+        }
+        return self._request("POST", "/uapi/overseas-stock/v1/trading/order", body=body, tr_id=tr_id, hash_body=True)
 
     def _request(
         self,
@@ -269,11 +456,37 @@ def parse_price_response(data: dict[str, Any]) -> dict[str, float]:
     }
 
 
+def parse_overseas_price_response(data: dict[str, Any]) -> dict[str, float]:
+    output = data.get("output") or {}
+    price = _first_float(output, ("last", "ovrs_prpr", "stck_prpr"))
+    open_price = _first_float(output, ("open", "ovrs_oprc", "stck_oprc")) or price
+    high = _first_float(output, ("high", "ovrs_hgpr", "stck_hgpr")) or price
+    low = _first_float(output, ("low", "ovrs_lwpr", "stck_lwpr")) or price
+    volume = _first_float(output, ("tvol", "acml_vol", "ovrs_acml_vol"))
+    value = _first_float(output, ("tamt", "acml_tr_pbmn", "ovrs_acml_tr_pbmn"))
+    prev_rate = _first_float(output, ("rate", "prdy_ctrt", "ovrs_prdy_ctrt"))
+    previous_close = _first_float(output, ("base", "clos", "ovrs_sdpr"))
+    if previous_close > 0 and price > 0 and prev_rate == 0:
+        prev_rate = ((price / previous_close) - 1.0) * 100.0
+    return {
+        "price": price,
+        "open": open_price,
+        "high": high,
+        "low": low,
+        "volume": volume,
+        "value": value,
+        "prev_rate_pct": prev_rate,
+    }
+
+
 def parse_rank_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
-    output = data.get("output") or data.get("output1") or []
-    if isinstance(output, dict):
-        output = [output]
-    return [row for row in output if isinstance(row, dict)]
+    rows: list[dict[str, Any]] = []
+    for key in ("output", "output1", "output2"):
+        output = data.get(key) or []
+        if isinstance(output, dict):
+            output = [output]
+        rows.extend(row for row in output if isinstance(row, dict))
+    return rows
 
 
 def parse_balance_response(data: dict[str, Any]) -> dict[str, Any]:
@@ -317,8 +530,106 @@ def parse_balance_response(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def parse_overseas_balance_response(data: dict[str, Any]) -> dict[str, Any]:
+    summary = _first_dict(data.get("output2"))
+    alt_summary = _first_dict(data.get("output3"))
+    holdings = data.get("output1") or []
+    if isinstance(holdings, dict):
+        holdings = [holdings]
+
+    parsed_holdings = []
+    for row in holdings:
+        if not isinstance(row, dict):
+            continue
+        quantity = _first_float(row, ("ovrs_cblc_qty", "ord_psbl_qty", "hldg_qty"))
+        if quantity <= 0:
+            continue
+        parsed_holdings.append(
+            {
+                "symbol": str(row.get("ovrs_pdno") or row.get("pdno") or "").strip(),
+                "name": str(row.get("ovrs_item_name") or row.get("prdt_name") or row.get("prdt_abrv_name") or "").strip(),
+                "quantity": quantity,
+                "average_price": _first_float(row, ("pchs_avg_pric", "frcr_pchs_amt1")),
+                "current_price": _first_float(row, ("now_pric2", "ovrs_now_pric1", "prpr")),
+                "evaluation": _first_float(row, ("ovrs_stck_evlu_amt", "evlu_amt", "frcr_evlu_amt2")),
+                "profit_loss": _first_float(row, ("frcr_evlu_pfls_amt", "evlu_pfls_amt")),
+                "profit_loss_rate": _first_float(row, ("evlu_pfls_rt", "evlu_erng_rt")),
+            }
+        )
+
+    cash = _first_float(summary, ("frcr_dncl_amt_2", "frcr_drwg_psbl_amt_1", "ord_psbl_frcr_amt"))
+    withdrawable_cash = _first_float(summary, ("frcr_drwg_psbl_amt_1", "ord_psbl_frcr_amt", "frcr_dncl_amt_2"))
+    if cash == 0:
+        cash = _first_float(alt_summary, ("frcr_dncl_amt_2", "frcr_drwg_psbl_amt_1", "ord_psbl_frcr_amt"))
+    if withdrawable_cash == 0:
+        withdrawable_cash = _first_float(alt_summary, ("frcr_drwg_psbl_amt_1", "ord_psbl_frcr_amt", "frcr_dncl_amt_2"))
+
+    return {
+        "rt_cd": str(data.get("rt_cd", "")),
+        "msg_cd": data.get("msg_cd", ""),
+        "message": data.get("msg1", ""),
+        "cash": cash,
+        "withdrawable_cash": withdrawable_cash,
+        "total_evaluation": _first_float(summary, ("tot_evlu_amt", "tot_asst_amt", "ovrs_stck_evlu_amt", "frcr_evlu_amt2")),
+        "stock_evaluation": _first_float(summary, ("ovrs_stck_evlu_amt", "frcr_evlu_amt2")),
+        "profit_loss": _first_float(summary, ("tot_evlu_pfls_amt", "ovrs_tot_pfls", "evlu_pfls_smtl_amt")),
+        "profit_loss_rate": _first_float(summary, ("tot_pftrt", "rlzt_erng_rt", "evlu_pfls_rt")),
+        "holdings": parsed_holdings,
+        "raw": data,
+    }
+
+
 def rank_row_symbol(row: dict[str, Any]) -> str:
-    return str(row.get("stck_shrn_iscd") or row.get("mksc_shrn_iscd") or row.get("pdno") or "").strip()
+    return str(
+        row.get("stck_shrn_iscd")
+        or row.get("mksc_shrn_iscd")
+        or row.get("ovrs_pdno")
+        or row.get("symb")
+        or row.get("SYMB")
+        or row.get("rsym")
+        or row.get("PDNO")
+        or row.get("pdno")
+        or ""
+    ).strip()
+
+
+def _overseas_order_tr_id(exchange_code: str, side: str) -> str:
+    exchange_code = str(exchange_code or "").upper()
+    side = str(side or "").lower()
+    if side == "buy":
+        if exchange_code in {"NASD", "NYSE", "AMEX"}:
+            return "TTTT1002U"
+        if exchange_code == "SEHK":
+            return "TTTS1002U"
+        if exchange_code == "SHAA":
+            return "TTTS0202U"
+        if exchange_code == "SZAA":
+            return "TTTS0305U"
+        if exchange_code == "TKSE":
+            return "TTTS0308U"
+        if exchange_code in {"HASE", "VNSE"}:
+            return "TTTS0311U"
+    if side == "sell":
+        if exchange_code in {"NASD", "NYSE", "AMEX"}:
+            return "TTTT1006U"
+        if exchange_code == "SEHK":
+            return "TTTS1001U"
+        if exchange_code == "SHAA":
+            return "TTTS1005U"
+        if exchange_code == "SZAA":
+            return "TTTS0304U"
+        if exchange_code == "TKSE":
+            return "TTTS0307U"
+        if exchange_code in {"HASE", "VNSE"}:
+            return "TTTS0310U"
+    raise ValueError(f"unsupported overseas order: exchange_code={exchange_code}, side={side}")
+
+
+def _format_overseas_price(price: float) -> str:
+    number = _float(price)
+    if number <= 0:
+        return "0"
+    return f"{number:.8f}".rstrip("0").rstrip(".")
 
 
 def _token_expiry(data: dict[str, Any]) -> str:

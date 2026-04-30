@@ -50,8 +50,11 @@ http://<NAS-IP>:8000
 운영 데이터는 NAS에 남습니다.
 
 - `/volume1/docker/hantoo/state/config/kis.local.json`
+- `/volume1/docker/hantoo/state/config/kis.overseas.local.json`
 - `/volume1/docker/hantoo/state/config/live.local.json`
+- `/volume1/docker/hantoo/state/config/live.overseas.local.json`
 - `/volume1/docker/hantoo/state/reports/live_trading/`
+- `/volume1/docker/hantoo/state/reports/live_trading_overseas/`
 
 앱 코드는 GitHub에서 매번 새로 받아 빌드해도 위 파일들은 유지됩니다.
 
