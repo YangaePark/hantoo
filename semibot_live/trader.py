@@ -138,6 +138,18 @@ class LiveConfig:
         }
 
 
+@dataclass(frozen=True)
+class DirectEntryProfile:
+    min_bars: int = 3
+    min_volume_ratio: float = 0.8
+    min_vwap_ratio: float = 0.995
+    min_lookback_move: float = 0.001
+    require_opening_breakout: bool = False
+    max_setup_move: float | None = None
+    max_extension_pct: float | None = None
+    reason: str = "live_momentum_entry"
+
+
 class LiveTrader:
     def __init__(
         self,
@@ -700,9 +712,10 @@ class LiveTrader:
         now: datetime,
         strategy: StockScannerConfig,
     ) -> tuple[float, StockBar, str] | None:
+        profile = self._direct_entry_profile(now, strategy)
         symbol_bars = sorted((bar for bar in self.bars if bar.symbol == symbol), key=lambda bar: bar.timestamp)
         current_bars = [bar for bar in symbol_bars if bar.session == now.date()]
-        if len(current_bars) < 3:
+        if len(current_bars) < profile.min_bars:
             return None
         latest = current_bars[-1]
         previous_close = _previous_close_for(symbol_bars, latest)
@@ -714,25 +727,55 @@ class LiveTrader:
         setup_move = (latest.close / previous_close) - 1.0
         if not (strategy.gap_min_pct <= setup_move <= strategy.gap_max_pct):
             return None
+        if profile.max_setup_move is not None and setup_move > profile.max_setup_move:
+            return None
         if latest.volume <= 0:
             return None
         previous_volumes = [float(bar.volume) for bar in current_bars[:-1] if bar.volume > 0]
         volume_avg = sum(previous_volumes[-strategy.volume_sma :]) / min(len(previous_volumes), strategy.volume_sma) if previous_volumes else 0.0
         volume_ratio = latest.volume / volume_avg if volume_avg else 1.0
-        if volume_ratio < min(0.8, strategy.volume_factor):
+        if volume_ratio < profile.min_volume_ratio:
             return None
         vwap = _latest_vwap(current_bars)
-        if vwap > 0 and latest.close < vwap * 0.995:
+        if vwap > 0 and latest.close < vwap * profile.min_vwap_ratio:
+            return None
+        if vwap > 0 and profile.max_extension_pct is not None and (latest.close / vwap) - 1.0 > profile.max_extension_pct:
             return None
         lookback = current_bars[max(0, len(current_bars) - 4)]
-        if latest.close <= lookback.close * 1.001:
+        if latest.close <= lookback.close * (1.0 + profile.min_lookback_move):
             return None
         opening_cutoff = session_start + timedelta(minutes=strategy.observation_minutes)
         opening_bars = [bar for bar in current_bars if bar.timestamp < opening_cutoff]
         opening_high = max((bar.high for bar in opening_bars), default=latest.high)
-        breakout_bonus = 1.0 if latest.close > opening_high * (1.0 + strategy.min_edge_rate) else 0.0
+        opening_breakout = latest.close > opening_high * (1.0 + strategy.min_edge_rate)
+        if profile.require_opening_breakout and not opening_breakout:
+            return None
+        breakout_bonus = 1.0 if opening_breakout else 0.0
         score = (setup_move * 100.0) + min(volume_ratio, 5.0) + breakout_bonus
-        return score, latest, "live_momentum_entry"
+        return score, latest, profile.reason
+
+    def _direct_entry_profile(self, now: datetime, strategy: StockScannerConfig) -> DirectEntryProfile:
+        if self.market == OVERSEAS_MARKET:
+            if self._market_session(now) == SESSION_PREMARKET:
+                return DirectEntryProfile(
+                    min_bars=max(5, strategy.volume_sma + 1),
+                    min_volume_ratio=max(1.6, strategy.volume_factor),
+                    min_vwap_ratio=1.003,
+                    min_lookback_move=0.003,
+                    require_opening_breakout=True,
+                    max_setup_move=min(strategy.gap_max_pct, 0.08),
+                    max_extension_pct=min(strategy.max_extension_pct, 0.035),
+                    reason="live_premarket_momentum_entry",
+                )
+            return DirectEntryProfile(
+                min_bars=4,
+                min_volume_ratio=max(1.0, min(strategy.volume_factor, 1.3)),
+                min_vwap_ratio=0.998,
+                min_lookback_move=0.0015,
+                max_extension_pct=strategy.max_extension_pct,
+                reason="live_overseas_momentum_entry",
+            )
+        return DirectEntryProfile(max_extension_pct=strategy.max_extension_pct)
 
     def _set_trade_message(self, message: str) -> None:
         with self.lock:

@@ -321,6 +321,107 @@ class LiveConfigTests(unittest.TestCase):
             self.assertEqual(trader.snapshot()["orders"], 1)
             self.assertIn("live_momentum_entry", trader.snapshot()["trade_message"])
 
+    def test_overseas_regular_direct_entry_uses_overseas_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = replace(
+                StockScannerConfig(),
+                initial_capital=10_000,
+                observation_minutes=5,
+                gap_min_pct=0.003,
+                gap_max_pct=0.12,
+                volume_sma=2,
+                volume_factor=1.1,
+                max_extension_pct=0.05,
+                stop_loss_pct=0.012,
+            )
+            trader = LiveTrader(
+                LiveConfig.from_dict({"market": "overseas", "mode": "live", "account_no": "12345678"}),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            start = datetime(2026, 4, 30, 9, 30)
+            trader.active_symbols = ["AAPL"]
+            trader.cash = 10_000
+            trader.bars = [
+                StockBar("AAPL", start - timedelta(days=1), 100.0, 100.0, 100.0, 100.0, 1),
+                StockBar("AAPL", start, 101.0, 101.2, 100.8, 101.0, 1000),
+                StockBar("AAPL", start + timedelta(minutes=5), 101.0, 102.0, 100.9, 101.8, 1200),
+                StockBar("AAPL", start + timedelta(minutes=10), 101.8, 103.0, 101.7, 102.9, 1500),
+                StockBar("AAPL", start + timedelta(minutes=15), 102.9, 104.0, 102.8, 103.8, 2000),
+            ]
+            client = FakeOverseasOrderClient()
+
+            trader._evaluate(client, start + timedelta(minutes=16))
+
+            self.assertEqual(len(client.orders), 1)
+            self.assertEqual(client.orders[0]["symbol"], "AAPL")
+            self.assertEqual(client.orders[0]["exchange_code"], "NASD")
+            self.assertIn("live_overseas_momentum_entry", trader.snapshot()["trade_message"])
+
+    def test_overseas_premarket_direct_entry_uses_strict_profile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = StockScannerConfig(initial_capital=10_000)
+            trader = LiveTrader(
+                LiveConfig.from_dict(
+                    {
+                        "market": "overseas",
+                        "mode": "live",
+                        "account_no": "12345678",
+                        "overseas_premarket_enabled": True,
+                    }
+                ),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            strategy = trader._active_strategy(datetime(2026, 4, 30, 8, 35))
+            start = datetime(2026, 4, 30, 8, 0)
+            trader.active_symbols = ["NVDA"]
+            trader.cash = 10_000
+            trader.bars = [
+                StockBar("NVDA", start - timedelta(days=1), 100.0, 100.0, 100.0, 100.0, 1),
+                StockBar("NVDA", start, 101.5, 101.8, 101.0, 101.4, 1000),
+                StockBar("NVDA", start + timedelta(minutes=5), 101.4, 102.0, 101.3, 101.8, 1000),
+                StockBar("NVDA", start + timedelta(minutes=10), 101.8, 102.2, 101.5, 102.0, 1000),
+                StockBar("NVDA", start + timedelta(minutes=15), 102.0, 102.5, 101.8, 102.3, 1000),
+                StockBar("NVDA", start + timedelta(minutes=20), 102.3, 103.0, 102.1, 102.7, 1000),
+                StockBar("NVDA", start + timedelta(minutes=25), 102.7, 103.2, 102.5, 103.0, 1000),
+                StockBar("NVDA", start + timedelta(minutes=30), 103.0, 105.5, 103.0, 105.2, 2600),
+                StockBar("NVDA", start + timedelta(minutes=35), 105.2, 106.4, 105.1, 106.0, 3600),
+            ]
+            client = FakeOverseasOrderClient()
+
+            trader._try_live_direct_entry(client, start + timedelta(minutes=36), strategy, {}, [])
+
+            self.assertEqual(len(client.orders), 1)
+            self.assertLessEqual(client.orders[0]["quantity"] * 106.0, 5_000)
+            self.assertIn("live_premarket_momentum_entry", trader.snapshot()["trade_message"])
+
+    def test_overseas_premarket_direct_entry_rejects_weak_breakout(self):
+        config = LiveConfig.from_dict(
+            {
+                "market": "overseas",
+                "mode": "live",
+                "account_no": "12345678",
+                "overseas_premarket_enabled": True,
+            }
+        )
+        trader = LiveTrader(config, StockScannerConfig())
+        start = datetime(2026, 4, 30, 8, 0)
+        strategy = trader._active_strategy(start + timedelta(minutes=35))
+        trader.bars = [
+            StockBar("NVDA", start - timedelta(days=1), 100.0, 100.0, 100.0, 100.0, 1),
+            StockBar("NVDA", start, 101.5, 105.5, 101.0, 101.4, 1000),
+            StockBar("NVDA", start + timedelta(minutes=5), 101.4, 102.0, 101.3, 101.8, 1000),
+            StockBar("NVDA", start + timedelta(minutes=10), 101.8, 102.2, 101.5, 102.0, 1000),
+            StockBar("NVDA", start + timedelta(minutes=15), 102.0, 102.5, 101.8, 102.3, 1000),
+            StockBar("NVDA", start + timedelta(minutes=20), 102.3, 103.0, 102.1, 102.7, 1000),
+            StockBar("NVDA", start + timedelta(minutes=25), 102.7, 103.2, 102.5, 103.0, 1000),
+            StockBar("NVDA", start + timedelta(minutes=30), 103.0, 104.8, 103.0, 104.7, 1800),
+            StockBar("NVDA", start + timedelta(minutes=35), 104.7, 105.0, 104.5, 104.9, 1900),
+        ]
+
+        self.assertIsNone(trader._live_direct_entry_candidate("NVDA", start + timedelta(minutes=36), strategy))
+
     def test_live_direct_exit_sells_direct_position_on_stop(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             strategy = replace(StockScannerConfig(), initial_capital=1_000_000, stop_loss_pct=0.01)
@@ -394,6 +495,15 @@ class FakeDomesticOrderClient:
         self.orders = []
 
     def order_cash(self, **kwargs):
+        self.orders.append(kwargs)
+        return {"rt_cd": "0", "msg1": "정상"}
+
+
+class FakeOverseasOrderClient:
+    def __init__(self):
+        self.orders = []
+
+    def order_overseas(self, **kwargs):
         self.orders.append(kwargs)
         return {"rt_cd": "0", "msg1": "정상"}
 
