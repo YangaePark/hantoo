@@ -263,6 +263,15 @@ class LiveTrader:
                 continue
             self._add_tick(symbol, strategy_now, parsed)
         self._evaluate(client, strategy_now)
+        self._log_decision(
+            "cycle",
+            strategy_now,
+            session=session,
+            active_symbols=list(self.active_symbols),
+            position=self.position or {},
+            cash=round(self.cash, 2),
+            trade_message=str(self.status.get("trade_message", "")),
+        )
         with self.lock:
             self.status.update(
                 {
@@ -294,6 +303,13 @@ class LiveTrader:
                 }
             )
         self._set_trade_message(message)
+        self._log_decision(
+            "market_wait",
+            strategy_now,
+            session=SESSION_CLOSED,
+            reason=message,
+            active_symbols=list(self.active_symbols),
+        )
 
     def _record_retriable_error(self, exc: Exception, now: datetime) -> None:
         with self.lock:
@@ -307,6 +323,7 @@ class LiveTrader:
                 }
             )
         self._set_trade_message("통신 오류로 다음 주기에 재시도")
+        self._log_decision("error", now, error=str(exc), active_symbols=list(self.active_symbols))
 
     def _initial_symbols(self, client: KisClient) -> list[str]:
         if self.market == OVERSEAS_MARKET:
@@ -318,10 +335,14 @@ class LiveTrader:
         self.last_selection_at = now_ts
         candidates = self._candidate_symbols(client)
         ranked: list[tuple[float, str]] = []
+        rejected: list[dict[str, Any]] = []
         candidate_items = sorted(candidates.items(), key=lambda item: _source_priority(item[1]), reverse=True)
         for symbol, row in candidate_items[: self.config.candidate_pool_size]:
             parsed = self._fetch_price(client, symbol)
-            if not self._passes_live_candidate(parsed, row):
+            passed, reject_reason = self._live_candidate_filter(parsed, row)
+            if not passed:
+                if len(rejected) < 12:
+                    rejected.append({"symbol": symbol, "reason": reject_reason, "price": parsed.get("price", 0)})
                 continue
             score = self._live_candidate_score(parsed, row)
             ranked.append((score, symbol))
@@ -336,6 +357,14 @@ class LiveTrader:
             hold_minutes = max(1, round(self.config.min_selection_hold_sec / 60))
             self.status["selector_message"] = f"{market_label} {len(selected)}종목 / 후보 {len(candidates)}종목 / 유지 {hold_minutes}분"
             self.status["active_symbols"] = selected
+        self._log_decision(
+            "selection",
+            self._strategy_now(datetime.now()),
+            candidate_count=len(candidates),
+            selected=selected,
+            ranked=[{"symbol": symbol, "score": round(score, 4)} for score, symbol in ranked[: self.config.max_symbols]],
+            rejected=rejected,
+        )
         return selected
 
     def _fetch_price(self, client: KisClient, symbol: str) -> dict[str, float]:
@@ -453,26 +482,32 @@ class LiveTrader:
         return candidates
 
     def _passes_live_candidate(self, parsed: dict[str, float], row: dict[str, Any]) -> bool:
+        passed, _ = self._live_candidate_filter(parsed, row)
+        return passed
+
+    def _live_candidate_filter(self, parsed: dict[str, float], row: dict[str, Any]) -> tuple[bool, str]:
         strategy = self._active_strategy(self._strategy_now(datetime.now()))
         price = parsed["price"]
         if price <= 0:
-            return False
+            return False, "price<=0"
         if self.market == OVERSEAS_MARKET and price < OVERSEAS_MIN_PRICE:
-            return False
+            return False, f"price<{OVERSEAS_MIN_PRICE}"
         setup_move = parsed["prev_rate_pct"] / 100.0
         if not (strategy.gap_min_pct <= setup_move <= strategy.gap_max_pct):
-            return False
+            return False, f"setup_move {setup_move * 100:.2f}%"
         day_range = ((parsed["high"] - parsed["low"]) / price) if price else 0.0
         if day_range < strategy.min_atr_pct:
-            return False
+            return False, f"range {day_range * 100:.2f}%"
         avg_volume = _float(row.get("avrg_vol"))
         volume_surge = (parsed["volume"] / avg_volume) if avg_volume > 0 else _float(row.get("vol_inrt")) / 100.0
         sources = set(row.get("_sources", []))
         if volume_surge < strategy.volume_factor and "volume_surge" not in sources:
-            return False
+            return False, f"volume {volume_surge:.2f}x"
         trade_value = parsed["value"] or _row_trade_value(row)
         threshold = self._trade_value_threshold()
-        return trade_value >= threshold or "trade_value" in sources
+        if trade_value >= threshold or "trade_value" in sources:
+            return True, ""
+        return False, f"value {trade_value:.0f}<{threshold:.0f}"
 
     def _live_candidate_score(self, parsed: dict[str, float], row: dict[str, Any]) -> float:
         price = parsed["price"] or 1.0
@@ -616,16 +651,19 @@ class LiveTrader:
             if (candidate := self._live_direct_entry_candidate(symbol, now, strategy)) is not None
         ]
         if not candidates:
+            self._log_direct_entry_rejections(now, strategy)
             return False
         candidates.sort(key=lambda item: item[0], reverse=True)
         _, bar, reason = candidates[0]
         shares = _live_order_shares(self.cash, bar.close, strategy)
         if shares <= 0:
             self._set_trade_message(f"{bar.symbol}: 주문 가능 수량 없음")
+            self._log_decision("entry_skip", now, symbol=bar.symbol, reason="no_orderable_shares", price=bar.close)
             return False
         response = self._place_order(client, "buy", bar.symbol, shares, live=True, price=bar.close)
         if not _order_succeeded(response, True):
             self._set_trade_message(f"주문 실패: BUY {bar.symbol} ({_order_message(response)})")
+            self._log_decision("order_failed", now, side="buy", symbol=bar.symbol, shares=shares, price=bar.close, response=response)
             return False
         gross = shares * bar.close
         cost = gross * strategy.commission_rate
@@ -645,6 +683,17 @@ class LiveTrader:
         )
         trade_key = f"{trade.timestamp}|{trade.action}|{trade.symbol}|{trade.shares}|{trade.reason}"
         _append_live_trade(trade, response, self.config.mode, trade_key, self.report_dir)
+        self._log_decision(
+            "order_submitted",
+            now,
+            side="buy",
+            symbol=bar.symbol,
+            shares=shares,
+            price=bar.close,
+            reason=reason,
+            response=response,
+            cash_after=self.cash,
+        )
         if equity_curve:
             _write_live_equity(equity_curve, self.report_dir)
         if metrics:
@@ -681,6 +730,7 @@ class LiveTrader:
         response = self._place_order(client, "sell", symbol, shares, live=True, price=latest.close)
         if not _order_succeeded(response, True):
             self._set_trade_message(f"주문 실패: SELL {symbol} ({_order_message(response)})")
+            self._log_decision("order_failed", now, side="sell", symbol=symbol, shares=shares, price=latest.close, response=response)
             return False
         gross = shares * latest.close
         cost = gross * (strategy.commission_rate + strategy.sell_tax_rate)
@@ -701,6 +751,17 @@ class LiveTrader:
         )
         trade_key = f"{trade.timestamp}|{trade.action}|{trade.symbol}|{trade.shares}|{trade.reason}"
         _append_live_trade(trade, response, self.config.mode, trade_key, self.report_dir)
+        self._log_decision(
+            "order_submitted",
+            now,
+            side="sell",
+            symbol=symbol,
+            shares=shares,
+            price=latest.close,
+            reason=reason,
+            response=response,
+            cash_after=self.cash,
+        )
         with self.lock:
             self.status["orders"] = int(self.status.get("orders", 0)) + 1
             self.status["trade_message"] = f"최근 주문: SELL {trade.symbol} {trade.shares}주 ({trade.reason})"
@@ -753,6 +814,26 @@ class LiveTrader:
         breakout_bonus = 1.0 if opening_breakout else 0.0
         score = (setup_move * 100.0) + min(volume_ratio, 5.0) + breakout_bonus
         return score, latest, profile.reason
+
+    def _log_direct_entry_rejections(self, now: datetime, strategy: StockScannerConfig) -> None:
+        if not self.active_symbols:
+            return
+        rejected = []
+        for symbol in self.active_symbols[:12]:
+            rejected.append({"symbol": symbol, "reason": self._symbol_entry_reason(symbol, now)})
+        self._log_decision("entry_rejected", now, rejected=rejected, strategy=_strategy_snapshot(strategy))
+
+    def _log_decision(self, event: str, now: datetime, **payload: Any) -> None:
+        _append_decision_log(
+            self.report_dir,
+            {
+                "timestamp": now.isoformat(sep=" ", timespec="seconds"),
+                "market": self.market,
+                "mode": self.config.mode,
+                "event": event,
+                **payload,
+            },
+        )
 
     def _direct_entry_profile(self, now: datetime, strategy: StockScannerConfig) -> DirectEntryProfile:
         if self.market == OVERSEAS_MARKET:
@@ -1027,6 +1108,13 @@ def ensure_live_report(report_dir: Path | None = None, *, strategy_name: str = "
         )
 
 
+def _append_decision_log(report_dir: Path, payload: dict[str, Any]) -> None:
+    ensure_live_report(report_dir)
+    safe_payload = _json_safe(payload)
+    with (report_dir / "decision_log.jsonl").open("a", encoding="utf-8") as log_file:
+        log_file.write(json.dumps(safe_payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
 def _append_live_trade(trade, response: dict[str, Any], mode: str, trade_key: str, report_dir: Path) -> None:
     ensure_live_report(report_dir)
     with (report_dir / "trades.csv").open("a", newline="", encoding="utf-8") as csv_file:
@@ -1251,6 +1339,45 @@ def _order_succeeded(response: dict[str, Any], live: bool) -> bool:
 
 def _order_message(response: dict[str, Any]) -> str:
     return str(response.get("msg1") or response.get("msg_cd") or response)
+
+
+def _strategy_snapshot(strategy: StockScannerConfig) -> dict[str, Any]:
+    keys = (
+        "observation_minutes",
+        "gap_min_pct",
+        "gap_max_pct",
+        "volume_sma",
+        "volume_factor",
+        "min_atr_pct",
+        "max_atr_pct",
+        "max_extension_pct",
+        "risk_per_trade_pct",
+        "max_position_pct",
+        "stop_loss_pct",
+        "take_profit_pct",
+        "trailing_stop_pct",
+        "force_exit_time",
+    )
+    return {key: getattr(strategy, key) for key in keys}
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ", timespec="seconds")
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except TypeError:
+            pass
+    return value
 
 
 def _live_order_shares(cash: float, price: float, strategy: StockScannerConfig) -> int:

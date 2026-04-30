@@ -1,5 +1,6 @@
 import unittest
 import tempfile
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -320,6 +321,8 @@ class LiveConfigTests(unittest.TestCase):
             self.assertEqual(trader.position["symbol"], "005930")
             self.assertEqual(trader.snapshot()["orders"], 1)
             self.assertIn("live_momentum_entry", trader.snapshot()["trade_message"])
+            logs = _read_decision_logs(Path(tmpdir))
+            self.assertTrue(any(row["event"] == "order_submitted" and row["side"] == "buy" for row in logs))
 
     def test_overseas_regular_direct_entry_uses_overseas_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -441,6 +444,31 @@ class LiveConfigTests(unittest.TestCase):
             self.assertEqual(client.orders[0]["side"], "sell")
             self.assertIsNone(trader.position)
             self.assertIn("live_stop_loss", trader.snapshot()["trade_message"])
+            logs = _read_decision_logs(Path(tmpdir))
+            self.assertTrue(any(row["event"] == "order_submitted" and row["side"] == "sell" for row in logs))
+
+    def test_live_direct_entry_rejections_are_logged(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = replace(StockScannerConfig(), observation_minutes=5)
+            trader = LiveTrader(
+                LiveConfig(mode="live", account_no="12345678"),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            start = datetime(2026, 4, 30, 9, 0)
+            trader.active_symbols = ["005930"]
+            trader.bars = [
+                StockBar("005930", start - timedelta(days=1), 100.0, 100.0, 100.0, 100.0, 1),
+                StockBar("005930", start, 100.0, 100.0, 100.0, 100.0, 1000),
+                StockBar("005930", start + timedelta(minutes=5), 100.0, 100.1, 99.9, 100.0, 1000),
+                StockBar("005930", start + timedelta(minutes=10), 100.0, 100.1, 99.9, 100.0, 1000),
+            ]
+
+            entered = trader._try_live_direct_entry(FakeDomesticOrderClient(), start + timedelta(minutes=11), strategy, {}, [])
+
+            self.assertFalse(entered)
+            logs = _read_decision_logs(Path(tmpdir))
+            self.assertTrue(any(row["event"] == "entry_rejected" for row in logs))
 
 
 class FakeOverseasRankClient:
@@ -497,6 +525,11 @@ class FakeDomesticOrderClient:
     def order_cash(self, **kwargs):
         self.orders.append(kwargs)
         return {"rt_cd": "0", "msg1": "정상"}
+
+
+def _read_decision_logs(report_dir: Path):
+    path = report_dir / "decision_log.jsonl"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 class FakeOverseasOrderClient:
