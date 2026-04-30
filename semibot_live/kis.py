@@ -316,6 +316,33 @@ class KisClient:
             tr_id="TTTC2101R" if live else "VTTC2101R",
         )
 
+    def inquire_overseas_psamount(
+        self,
+        account_no: str,
+        product_code: str = "01",
+        *,
+        exchange_code: str = "NASD",
+        price: str = "1.4",
+        symbol: str = "QQQ",
+        live: bool = True,
+        night: bool = False,
+    ) -> dict[str, Any]:
+        params = {
+            "CANO": account_no,
+            "ACNT_PRDT_CD": product_code,
+            "OVRS_EXCG_CD": exchange_code,
+            "OVRS_ORD_UNPR": price,
+            "ITEM_CD": symbol,
+        }
+        tr_id = "JTTT3007R" if night else "TTTS3007R"
+        if not live:
+            tr_id = "VTTS3007R"
+        return self._request(
+            "GET",
+            f"/uapi/overseas-stock/v1/trading/inquire-psamount?{urlencode(params)}",
+            tr_id=tr_id,
+        )
+
     def order_cash(
         self,
         *,
@@ -657,6 +684,37 @@ def parse_overseas_margin_response(data: dict[str, Any], currency: str = "USD") 
     }
 
 
+def parse_overseas_psamount_response(data: dict[str, Any]) -> dict[str, Any]:
+    rows = _output_rows(data, ("output", "output1", "output2", "output3"))
+    orderable_cash = _first_float_from_rows(
+        rows,
+        (
+            "ovrs_ord_psbl_amt",
+            "ord_psbl_frcr_amt",
+            "frcr_ord_psbl_amt",
+            "max_ord_psbl_amt",
+            "ord_psbl_cash",
+            "ord_psbl_amt",
+            "frcr_buy_psbl_amt",
+            "ovrs_max_ord_psbl_amt",
+        ),
+    )
+    return {
+        "rt_cd": str(data.get("rt_cd", "")),
+        "msg_cd": data.get("msg_cd", ""),
+        "message": data.get("msg1", ""),
+        "cash": orderable_cash,
+        "withdrawable_cash": orderable_cash,
+        "total_evaluation": orderable_cash,
+        "stock_evaluation": 0.0,
+        "profit_loss": 0.0,
+        "profit_loss_rate": 0.0,
+        "holdings": [],
+        "debug_keys": _response_key_summary(data),
+        "raw": data,
+    }
+
+
 def rank_row_symbol(row: dict[str, Any]) -> str:
     return str(
         row.get("stck_shrn_iscd")
@@ -779,6 +837,17 @@ def _output_rows(data: dict[str, Any], keys: tuple[str, ...]) -> list[dict[str, 
     for key in keys:
         rows.extend(_dict_rows(data.get(key)))
     return rows
+
+
+def _response_key_summary(data: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("output", "output1", "output2", "output3"):
+        rows = _dict_rows(data.get(key))
+        if not rows:
+            continue
+        row_keys = sorted({row_key for row in rows[:3] for row_key in row})
+        parts.append(f"{key}: {','.join(row_keys[:12])}")
+    return " / ".join(parts)
 
 
 def _looks_like_overseas_holding(row: dict[str, Any]) -> bool:

@@ -214,6 +214,24 @@ class KisTokenTests(unittest.TestCase):
         self.assertEqual(parsed["withdrawable_cash"], 6500)
         self.assertEqual(parsed["total_evaluation"], 7000)
 
+    def test_overseas_psamount_response_is_parsed(self):
+        from semibot_live.kis import parse_overseas_psamount_response
+
+        parsed = parse_overseas_psamount_response(
+            {
+                "rt_cd": "0",
+                "msg1": "정상",
+                "output": {
+                    "ovrs_ord_psbl_amt": "1234.56",
+                    "ovrs_max_ord_psbl_qty": "12",
+                },
+            }
+        )
+
+        self.assertEqual(parsed["cash"], 1234.56)
+        self.assertEqual(parsed["withdrawable_cash"], 1234.56)
+        self.assertIn("ovrs_ord_psbl_amt", parsed["debug_keys"])
+
     def test_overseas_rank_rows_and_symbols_are_parsed(self):
         from semibot_live.kis import parse_rank_rows, rank_row_symbol
 

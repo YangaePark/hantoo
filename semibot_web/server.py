@@ -18,6 +18,7 @@ from semibot_live.kis import (
     parse_balance_response,
     parse_overseas_balance_response,
     parse_overseas_margin_response,
+    parse_overseas_psamount_response,
 )
 from semibot_live.trader import (
     DEFAULT_MARKET,
@@ -266,8 +267,7 @@ def load_kis_balance(market: str = DEFAULT_MARKET) -> dict:
             )
             parsed = parse_overseas_balance_response(response)
             if _overseas_balance_needs_margin_fallback(parsed):
-                margin_response = client.inquire_overseas_margin(config.account_no, config.product_code, live=True)
-                parsed = _merge_overseas_margin(parsed, parse_overseas_margin_response(margin_response, config.currency))
+                parsed = _load_overseas_cash_fallback(client, config, parsed)
         else:
             response = client.inquire_balance(config.account_no, config.product_code, live=True)
             parsed = parse_balance_response(response)
@@ -285,6 +285,11 @@ def load_kis_balance(market: str = DEFAULT_MARKET) -> dict:
             "holdings": [],
         }
     ok = parsed["rt_cd"] in {"0", ""}
+    if market == OVERSEAS_MARKET and ok and balance_max_seed(parsed) <= 0:
+        parsed["rt_cd"] = "-1"
+        parsed["msg_cd"] = "OVERSEAS_BALANCE_ZERO"
+        parsed["message"] = _overseas_zero_balance_message(parsed)
+        ok = False
     parsed.pop("raw", None)
     max_seed_capital = balance_max_seed(parsed)
     return {
@@ -339,6 +344,50 @@ def _merge_overseas_margin(balance: dict, margin: dict) -> dict:
             merged[key] = margin[key]
     merged["margin_checked"] = True
     return merged
+
+
+def _load_overseas_cash_fallback(client: KisClient, config: LiveConfig, parsed: dict) -> dict:
+    merged = parsed
+    for night in (False, True):
+        psamount_response = client.inquire_overseas_psamount(
+            config.account_no,
+            config.product_code,
+            exchange_code=config.exchange_code,
+            live=True,
+            night=night,
+        )
+        psamount = parse_overseas_psamount_response(psamount_response)
+        merged = _merge_overseas_psamount(merged, psamount, "night" if night else "regular")
+        if balance_max_seed(merged) > 0:
+            return merged
+
+    margin_response = client.inquire_overseas_margin(config.account_no, config.product_code, live=True)
+    return _merge_overseas_margin(merged, parse_overseas_margin_response(margin_response, config.currency))
+
+
+def _merge_overseas_psamount(balance: dict, psamount: dict, ledger: str) -> dict:
+    merged = dict(balance)
+    merged["psamount_checked"] = True
+    merged["psamount_ledger"] = ledger
+    merged["psamount_msg_cd"] = psamount.get("msg_cd", "")
+    merged["psamount_message"] = psamount.get("message", "")
+    merged["psamount_debug_keys"] = psamount.get("debug_keys", "")
+    if str(psamount.get("rt_cd", "")) not in {"0", ""}:
+        return merged
+    for key in ("cash", "withdrawable_cash", "total_evaluation"):
+        if _to_number(merged.get(key, 0)) == 0 and _to_number(psamount.get(key, 0)) != 0:
+            merged[key] = psamount[key]
+    return merged
+
+
+def _overseas_zero_balance_message(parsed: dict) -> str:
+    details = []
+    for key in ("psamount_msg_cd", "psamount_message", "margin_msg_cd", "margin_message", "psamount_debug_keys"):
+        value = str(parsed.get(key, "")).strip()
+        if value:
+            details.append(value)
+    suffix = f" ({' / '.join(details)})" if details else ""
+    return f"해외 잔고/매수가능금액 응답에서 USD 금액을 찾지 못했습니다.{suffix}"
 
 
 def _market_from_query(parsed) -> str:
