@@ -364,6 +364,53 @@ class LiveConfigTests(unittest.TestCase):
             logs = _read_decision_logs(Path(tmpdir))
             self.assertTrue(any(row["event"] == "order_submitted" and row["side"] == "buy" for row in logs))
 
+    def test_live_direct_entry_honors_daily_trade_limit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_dir = Path(tmpdir)
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / "trades.csv").write_text(
+                "timestamp,action,symbol,shares,price,gross,cost,realized_pnl,cash_after,reason,mode,order_response,trade_key\n"
+                "2026-04-30 09:10:00,BUY,000660,1,100.0,100.0,0.0,0.0,999900.0,live_momentum_entry,live,{},buy-key\n"
+                "2026-04-30 09:20:00,SELL_ALL,000660,1,101.0,101.0,0.0,1.0,1000001.0,live_take_profit,live,{},sell-key\n",
+                encoding="utf-8",
+            )
+            strategy = replace(
+                StockScannerConfig(),
+                initial_capital=1_000_000,
+                observation_minutes=5,
+                gap_min_pct=0.003,
+                gap_max_pct=0.12,
+                volume_sma=2,
+                volume_factor=1.0,
+                min_atr_pct=0.0,
+                max_atr_pct=0.2,
+                max_trades_per_day=1,
+            )
+            trader = LiveTrader(
+                LiveConfig(mode="live", account_no="12345678"),
+                strategy,
+                report_dir=report_dir,
+            )
+            start = datetime(2026, 4, 30, 9, 0)
+            trader.active_symbols = ["005930"]
+            trader.cash = 1_000_000
+            trader.bars = [
+                StockBar("005930", start - timedelta(days=1), 100.0, 100.0, 100.0, 100.0, 1),
+                StockBar("005930", start, 101.0, 110.0, 100.5, 101.0, 1000),
+                StockBar("005930", start + timedelta(minutes=5), 101.0, 102.0, 100.8, 102.0, 1100),
+                StockBar("005930", start + timedelta(minutes=10), 102.0, 103.2, 101.8, 103.0, 1200),
+                StockBar("005930", start + timedelta(minutes=15), 103.0, 104.5, 102.8, 104.2, 1500),
+            ]
+            client = FakeDomesticOrderClient()
+
+            entered = trader._try_live_direct_entry(client, start + timedelta(minutes=16), strategy, {}, [])
+
+            self.assertFalse(entered)
+            self.assertEqual(client.orders, [])
+            self.assertIn("일일 진입 한도 도달", trader.snapshot()["trade_message"])
+            logs = _read_decision_logs(report_dir)
+            self.assertTrue(any(row["event"] == "entry_skip" and row["reason"] == "daily_trade_limit" for row in logs))
+
     def test_overseas_regular_direct_entry_uses_overseas_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             strategy = replace(

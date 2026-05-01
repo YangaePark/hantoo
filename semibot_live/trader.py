@@ -701,6 +701,18 @@ class LiveTrader:
             return
         live = self.config.mode == "live"
         if latest_trade.action == "BUY":
+            entry_count = _live_buy_count_for_session(self.report_dir, now.date())
+            if live and entry_count >= strategy.max_trades_per_day:
+                self._set_trade_message(_daily_entry_limit_message(entry_count, strategy.max_trades_per_day))
+                self._log_decision(
+                    "entry_skip",
+                    now,
+                    symbol=latest_trade.symbol,
+                    reason="daily_trade_limit",
+                    entries=entry_count,
+                    max_trades_per_day=strategy.max_trades_per_day,
+                )
+                return
             response = self._place_order(client, "buy", latest_trade.symbol, latest_trade.shares, live, latest_trade.price)
             if not _order_succeeded(response, live):
                 self._set_trade_message(f"주문 실패: BUY {latest_trade.symbol} ({_order_message(response)})")
@@ -736,6 +748,17 @@ class LiveTrader:
         fresh_symbols: set[str] | None = None,
     ) -> bool:
         if self.config.mode != "live" or self.position or now.time() >= strategy.force_exit_clock:
+            return False
+        entry_count = _live_buy_count_for_session(self.report_dir, now.date())
+        if entry_count >= strategy.max_trades_per_day:
+            self._set_trade_message(_daily_entry_limit_message(entry_count, strategy.max_trades_per_day))
+            self._log_decision(
+                "entry_skip",
+                now,
+                reason="daily_trade_limit",
+                entries=entry_count,
+                max_trades_per_day=strategy.max_trades_per_day,
+            )
             return False
         symbols = [symbol for symbol in self.active_symbols if fresh_symbols is None or symbol in fresh_symbols]
         candidates = [
@@ -982,6 +1005,9 @@ class LiveTrader:
             prefix = ""
         if now.time() >= strategy.force_exit_clock:
             return f"{strategy.force_exit_time} 이후 신규 진입 중단"
+        entry_count = _live_buy_count_for_session(self.report_dir, now.date())
+        if entry_count >= strategy.max_trades_per_day:
+            return _daily_entry_limit_message(entry_count, strategy.max_trades_per_day)
 
         reasons: list[tuple[str, str]] = []
         for symbol in self.active_symbols:
@@ -1284,6 +1310,26 @@ def _open_position_from_trades(report_dir: Path) -> tuple[dict[str, Any] | None,
     return position, cash
 
 
+def _live_buy_count_for_session(report_dir: Path, session: object) -> int:
+    path = report_dir / "trades.csv"
+    if not path.exists():
+        return 0
+    with path.open(newline="", encoding="utf-8") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    count = 0
+    for row in rows:
+        action = str(row.get("action") or "").upper()
+        if action != "BUY":
+            continue
+        if _timestamp_date(row.get("timestamp")) == session:
+            count += 1
+    return count
+
+
+def _daily_entry_limit_message(entry_count: int, max_trades_per_day: int) -> str:
+    return f"일일 진입 한도 도달 ({entry_count}/{max_trades_per_day}회)"
+
+
 def _write_live_equity(rows: list[dict[str, Any]], report_dir: Path) -> None:
     if not rows:
         return
@@ -1510,7 +1556,11 @@ def _strategy_snapshot(strategy: StockScannerConfig) -> dict[str, Any]:
 def _position_entry_date(position: dict[str, Any] | None) -> object | None:
     if not position:
         return None
-    value = str(position.get("entry_time") or "").strip()
+    return _timestamp_date(position.get("entry_time"))
+
+
+def _timestamp_date(value: Any) -> object | None:
+    value = str(value or "").strip()
     if not value:
         return None
     for candidate in (value, value.replace("T", " ")):
