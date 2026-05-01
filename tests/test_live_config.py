@@ -274,6 +274,15 @@ class LiveConfigTests(unittest.TestCase):
         self.assertEqual(trader._market_session(datetime(2026, 4, 30, 8, 0)), "closed")
         self.assertEqual(trader._market_session(datetime(2026, 4, 30, 10, 0)), "regular")
 
+    def test_market_wait_clears_stale_price_error_count(self):
+        config = LiveConfig.from_dict({"market": "overseas", "overseas_premarket_enabled": True})
+        trader = LiveTrader(config, StockScannerConfig())
+        trader.status["price_error_count"] = 3
+
+        trader._set_market_wait_status(datetime(2026, 4, 30, 17, 0), datetime(2026, 4, 30, 17, 0))
+
+        self.assertEqual(trader.snapshot()["price_error_count"], 0)
+
     def test_overseas_empty_rankings_fall_back_to_liquid_universe(self):
         config = LiveConfig.from_dict({"market": "overseas", "overseas_premarket_enabled": True})
         trader = LiveTrader(config, StockScannerConfig())

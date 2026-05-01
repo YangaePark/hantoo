@@ -362,6 +362,7 @@ class LiveTrader:
                     "active_symbols": list(self.active_symbols),
                     "session": SESSION_CLOSED,
                     "session_label": "해외장 대기",
+                    "price_error_count": 0,
                 }
             )
         self._set_trade_message(message)
