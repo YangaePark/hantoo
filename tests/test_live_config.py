@@ -15,12 +15,19 @@ class LiveConfigTests(unittest.TestCase):
 
         self.assertTrue(config.auto_select)
         self.assertEqual(config.max_symbols, 20)
+        self.assertEqual(config.max_positions, 3)
         self.assertEqual(config.selection_refresh_sec, 300)
         self.assertEqual(config.min_selection_hold_sec, 1800)
         self.assertEqual(config.min_bars_before_evaluate, 20)
         self.assertEqual(config.seed_capital, 1_000_000.0)
         self.assertEqual(config.seed_source, "manual")
         self.assertFalse(config.auto_start)
+
+    def test_max_positions_can_be_configured(self):
+        config = LiveConfig.from_dict({"max_positions": 5})
+
+        self.assertEqual(config.max_positions, 5)
+        self.assertEqual(config.to_dict()["max_positions"], 5)
 
     def test_old_fast_selection_refresh_is_migrated(self):
         config = LiveConfig.from_dict({"selection_refresh_sec": 60, "min_selection_hold_sec": 600})
@@ -411,6 +418,66 @@ class LiveConfigTests(unittest.TestCase):
             logs = _read_decision_logs(report_dir)
             self.assertTrue(any(row["event"] == "entry_skip" and row["reason"] == "daily_trade_limit" for row in logs))
 
+    def test_live_direct_entry_can_add_second_position_with_slot_budget(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = replace(
+                StockScannerConfig(),
+                initial_capital=900_000,
+                observation_minutes=5,
+                gap_min_pct=0.003,
+                gap_max_pct=0.12,
+                volume_sma=2,
+                volume_factor=1.0,
+                min_atr_pct=0.0,
+                max_atr_pct=0.2,
+            )
+            trader = LiveTrader(
+                LiveConfig(mode="live", account_no="12345678", max_positions=3),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            start = datetime(2026, 4, 30, 9, 0)
+            trader.positions = [{"symbol": "000660", "shares": 10, "entry_price": 100.0, "highest_price": 100.0}]
+            trader.active_symbols = ["000660", "005930"]
+            trader.cash = 600_000
+            trader.bars = [
+                StockBar("005930", start - timedelta(days=1), 100.0, 100.0, 100.0, 100.0, 1),
+                StockBar("005930", start, 101.0, 110.0, 100.5, 101.0, 1000),
+                StockBar("005930", start + timedelta(minutes=5), 101.0, 102.0, 100.8, 102.0, 1100),
+                StockBar("005930", start + timedelta(minutes=10), 102.0, 103.2, 101.8, 103.0, 1200),
+                StockBar("005930", start + timedelta(minutes=15), 103.0, 104.5, 102.8, 104.2, 1500),
+            ]
+            client = FakeDomesticOrderClient()
+
+            entered = trader._try_live_direct_entry(client, start + timedelta(minutes=16), strategy, {}, [])
+
+            self.assertTrue(entered)
+            self.assertEqual(len(trader.positions), 2)
+            self.assertEqual(trader.positions[1]["symbol"], "005930")
+            self.assertLessEqual(client.orders[0]["quantity"] * 104.2, 300_000)
+
+    def test_live_direct_entry_stops_at_max_positions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = StockScannerConfig(initial_capital=900_000)
+            trader = LiveTrader(
+                LiveConfig(mode="live", account_no="12345678", max_positions=2),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            now = datetime(2026, 4, 30, 10, 0)
+            trader.positions = [
+                {"symbol": "000660", "shares": 10, "entry_price": 100.0, "highest_price": 100.0},
+                {"symbol": "005930", "shares": 10, "entry_price": 100.0, "highest_price": 100.0},
+            ]
+            trader.active_symbols = ["035420"]
+            client = FakeDomesticOrderClient()
+
+            entered = trader._try_live_direct_entry(client, now, strategy, {}, [])
+
+            self.assertFalse(entered)
+            self.assertEqual(client.orders, [])
+            self.assertIn("최대 동시보유 도달", trader.snapshot()["trade_message"])
+
     def test_overseas_regular_direct_entry_uses_overseas_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             strategy = replace(
@@ -534,6 +601,32 @@ class LiveConfigTests(unittest.TestCase):
             logs = _read_decision_logs(Path(tmpdir))
             self.assertTrue(any(row["event"] == "order_submitted" and row["side"] == "sell" for row in logs))
 
+    def test_live_direct_exit_tracks_each_position_independently(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = replace(StockScannerConfig(), initial_capital=1_000_000, stop_loss_pct=0.01)
+            trader = LiveTrader(
+                LiveConfig(mode="live", account_no="12345678", max_positions=3),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            now = datetime(2026, 4, 30, 10, 0)
+            trader.positions = [
+                {"symbol": "005930", "shares": 10, "entry_price": 100.0, "highest_price": 100.0},
+                {"symbol": "000660", "shares": 8, "entry_price": 100.0, "highest_price": 101.0},
+            ]
+            trader.bars = [
+                StockBar("005930", now, 98.8, 99.0, 98.5, 98.8, 1000),
+                StockBar("000660", now, 101.0, 101.5, 100.5, 101.0, 1000),
+            ]
+            client = FakeDomesticOrderClient()
+
+            sold = trader._try_live_direct_exit(client, now, strategy, {"005930", "000660"})
+
+            self.assertTrue(sold)
+            self.assertEqual(client.orders[0]["symbol"], "005930")
+            self.assertEqual(len(trader.positions), 1)
+            self.assertEqual(trader.positions[0]["symbol"], "000660")
+
     def test_domestic_run_cycle_force_exits_position_after_selection_drops_it(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             strategy = StockScannerConfig(initial_capital=1_000_000, force_exit_time="15:15")
@@ -645,6 +738,28 @@ class LiveConfigTests(unittest.TestCase):
             self.assertEqual(trader.position["symbol"], "IREN")
             self.assertEqual(trader.position["shares"], 6)
             self.assertEqual(trader.cash, 405.12)
+
+    def test_multiple_open_positions_are_restored_from_trade_log(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_dir = Path(tmpdir)
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / "trades.csv").write_text(
+                "timestamp,action,symbol,shares,price,gross,cost,realized_pnl,cash_after,reason,mode,order_response,trade_key\n"
+                "2026-04-30 06:29:30,BUY,IREN,6,43.64,261.84,0.13,0.0,738.03,live_premarket_momentum_entry,live,{},key1\n"
+                "2026-04-30 06:35:30,BUY,AAPL,2,170.00,340.00,0.17,0.0,397.86,live_overseas_momentum_entry,live,{},key2\n"
+                "2026-04-30 06:40:30,SELL_ALL,IREN,6,44.00,264.00,0.13,2.03,661.73,live_take_profit,live,{},key3\n",
+                encoding="utf-8",
+            )
+
+            trader = LiveTrader(
+                LiveConfig.from_dict({"market": "overseas", "mode": "live", "account_no": "12345678"}),
+                StockScannerConfig(initial_capital=1_000),
+                report_dir=report_dir,
+            )
+
+            self.assertEqual(len(trader.positions), 1)
+            self.assertEqual(trader.positions[0]["symbol"], "AAPL")
+            self.assertEqual(trader.cash, 661.73)
 
     def test_live_direct_entry_rejections_are_logged(self):
         with tempfile.TemporaryDirectory() as tmpdir:

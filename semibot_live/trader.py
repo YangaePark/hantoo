@@ -76,6 +76,7 @@ class LiveConfig:
     poll_interval_sec: int = 10
     bar_minutes: int = 5
     max_symbols: int = 20
+    max_positions: int = 3
     selection_refresh_sec: int = 300
     min_selection_hold_sec: int = 1800
     min_bars_before_evaluate: int = 20
@@ -104,6 +105,7 @@ class LiveConfig:
             poll_interval_sec=int(data.get("poll_interval_sec", 10)),
             bar_minutes=int(data.get("bar_minutes", 5)),
             max_symbols=int(data.get("max_symbols", 20)),
+            max_positions=max(1, int(data.get("max_positions", 3))),
             selection_refresh_sec=max(300, int(data.get("selection_refresh_sec", 300))),
             min_selection_hold_sec=max(1800, int(data.get("min_selection_hold_sec", 1800))),
             min_bars_before_evaluate=max(1, int(data.get("min_bars_before_evaluate", 20))),
@@ -129,6 +131,7 @@ class LiveConfig:
             "poll_interval_sec": self.poll_interval_sec,
             "bar_minutes": self.bar_minutes,
             "max_symbols": self.max_symbols,
+            "max_positions": self.max_positions,
             "selection_refresh_sec": self.selection_refresh_sec,
             "min_selection_hold_sec": self.min_selection_hold_sec,
             "min_bars_before_evaluate": self.min_bars_before_evaluate,
@@ -182,6 +185,7 @@ class LiveTrader:
             "seed_source": config.seed_source,
             "auto_start": config.auto_start,
             "symbol": config.symbol,
+            "max_positions": config.max_positions,
             "exchange_code": config.exchange_code,
             "price_exchange_code": config.price_exchange_code,
             "currency": config.currency,
@@ -205,16 +209,24 @@ class LiveTrader:
         self.last_selection_at = 0.0
         self.regular_reset_dates: set[object] = set()
         self.startup_token_checked = False
-        self.position: dict[str, Any] | None = None
+        self.positions: list[dict[str, Any]] = []
         self.cash = strategy.initial_capital
         self.day_start_cash = strategy.initial_capital
         ensure_live_report(self.report_dir, strategy_name=_strategy_name(self.market))
-        restored_position, restored_cash = _open_position_from_trades(self.report_dir)
-        if restored_position:
-            self.position = restored_position
+        restored_positions, restored_cash = _open_positions_from_trades(self.report_dir)
+        if restored_positions:
+            self.positions = restored_positions
             if restored_cash > 0:
                 self.cash = restored_cash
-            self.status["trade_message"] = f"기존 보유 복원: {restored_position['symbol']} {restored_position['shares']}주"
+            self.status["trade_message"] = f"기존 보유 복원: {_positions_summary(restored_positions)}"
+
+    @property
+    def position(self) -> dict[str, Any] | None:
+        return self.positions[0] if self.positions else None
+
+    @position.setter
+    def position(self, value: dict[str, Any] | None) -> None:
+        self.positions = [value] if value else []
 
     def start(self) -> None:
         if self.running:
@@ -229,11 +241,14 @@ class LiveTrader:
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             data = dict(self.status)
-            data["position"] = self.position or {}
+            positions = [dict(position) for position in self.positions]
+            data["position"] = positions[0] if positions else {}
+            data["positions"] = positions
             data["cash"] = round(self.cash, 2)
             data["seed_capital"] = round(self.strategy.initial_capital, 2)
             data["seed_source"] = self.config.seed_source
             data["auto_start"] = self.config.auto_start
+            data["max_positions"] = self.config.max_positions
             data["active_symbols"] = list(self.active_symbols)
             return data
 
@@ -308,6 +323,7 @@ class LiveTrader:
             session=session,
             active_symbols=list(self.active_symbols),
             position=self.position or {},
+            positions=[dict(position) for position in self.positions],
             cash=round(self.cash, 2),
             trade_message=str(self.status.get("trade_message", "")),
             bar_collection=bar_status,
@@ -356,6 +372,7 @@ class LiveTrader:
             reason=message,
             active_symbols=list(self.active_symbols),
             position=self.position or {},
+            positions=[dict(position) for position in self.positions],
         )
 
     def _record_retriable_error(self, exc: Exception, now: datetime) -> None:
@@ -453,7 +470,7 @@ class LiveTrader:
     def _reset_premarket_bars_for_regular_if_flat(self, now: datetime, session: str) -> None:
         if self.market != OVERSEAS_MARKET or not self.config.overseas_premarket_enabled:
             return
-        if session != SESSION_REGULAR or self.position:
+        if session != SESSION_REGULAR or self.positions:
             return
         if now.date() in self.regular_reset_dates:
             return
@@ -626,9 +643,10 @@ class LiveTrader:
 
     def _symbols_to_poll(self) -> list[str]:
         symbols = list(self.active_symbols)
-        position_symbol = str((self.position or {}).get("symbol") or "")
-        if position_symbol and position_symbol not in symbols:
-            symbols.insert(0, position_symbol)
+        for position in reversed(self.positions):
+            position_symbol = str(position.get("symbol") or "")
+            if position_symbol and position_symbol not in symbols:
+                symbols.insert(0, position_symbol)
         return symbols
 
     def _bar_collection_status(self, now: datetime) -> dict[str, Any]:
@@ -684,10 +702,17 @@ class LiveTrader:
             self._set_trade_message(f"5분봉 데이터 수집 중 ({len(self.bars)}/{self.config.min_bars_before_evaluate})")
             return
         result = StockScannerBacktester(strategy).run(self.bars)
+        if self.config.mode == "live" and self._try_live_direct_entry(
+            client,
+            now,
+            strategy,
+            result.metrics,
+            result.equity_curve,
+            fresh_symbols,
+        ):
+            return
         latest_trade = result.trades[-1] if result.trades else None
         if not latest_trade:
-            if self._try_live_direct_entry(client, now, strategy, result.metrics, result.equity_curve, fresh_symbols):
-                return
             self._set_trade_message(self._entry_wait_message(now))
             _write_live_metrics(result.metrics, self.report_dir)
             return
@@ -696,7 +721,7 @@ class LiveTrader:
             return
         last_recorded = _last_trade_key(self.report_dir)
         trade_key = f"{latest_trade.timestamp}|{latest_trade.action}|{latest_trade.symbol}|{latest_trade.shares}|{latest_trade.reason}"
-        if trade_key == last_recorded:
+        if trade_key == last_recorded or _trade_key_exists(self.report_dir, trade_key):
             self._set_trade_message("최근 신호는 이미 기록됨")
             return
         live = self.config.mode == "live"
@@ -713,6 +738,38 @@ class LiveTrader:
                     max_trades_per_day=strategy.max_trades_per_day,
                 )
                 return
+            if live:
+                if not self._can_open_position(latest_trade.symbol, now, strategy):
+                    return
+                bar = _latest_symbol_bar(self.bars, latest_trade.symbol, now.date()) or StockBar(
+                    latest_trade.symbol,
+                    latest_trade.timestamp,
+                    latest_trade.price,
+                    latest_trade.price,
+                    latest_trade.price,
+                    latest_trade.price,
+                    1,
+                )
+                shares = _live_order_shares(
+                    self.cash,
+                    bar.close,
+                    strategy,
+                    self.config.max_positions,
+                    self.strategy.initial_capital,
+                )
+                if self._submit_live_buy(
+                    client,
+                    now,
+                    strategy,
+                    bar,
+                    shares,
+                    latest_trade.reason,
+                    result.metrics,
+                    result.equity_curve,
+                    trade_timestamp=latest_trade.timestamp,
+                ):
+                    return
+                return
             response = self._place_order(client, "buy", latest_trade.symbol, latest_trade.shares, live, latest_trade.price)
             if not _order_succeeded(response, live):
                 self._set_trade_message(f"주문 실패: BUY {latest_trade.symbol} ({_order_message(response)})")
@@ -725,6 +782,32 @@ class LiveTrader:
                 "entry_time": latest_trade.timestamp.isoformat(sep=" "),
             }
         else:
+            if live:
+                position = self._position_for_symbol(latest_trade.symbol)
+                if not position:
+                    self._set_trade_message(f"{latest_trade.symbol}: 매도 신호가 있으나 보유 없음")
+                    return
+                bar = _latest_symbol_bar(self.bars, latest_trade.symbol, now.date()) or StockBar(
+                    latest_trade.symbol,
+                    latest_trade.timestamp,
+                    latest_trade.price,
+                    latest_trade.price,
+                    latest_trade.price,
+                    latest_trade.price,
+                    1,
+                )
+                if self._submit_live_sell(
+                    client,
+                    now,
+                    strategy,
+                    position,
+                    bar,
+                    latest_trade.reason,
+                    trade_timestamp=latest_trade.timestamp,
+                ):
+                    _write_live_equity(result.equity_curve, self.report_dir)
+                    _write_live_metrics(result.metrics, self.report_dir)
+                return
             response = self._place_order(client, "sell", latest_trade.symbol, latest_trade.shares, live, latest_trade.price)
             if not _order_succeeded(response, live):
                 self._set_trade_message(f"주문 실패: SELL {latest_trade.symbol} ({_order_message(response)})")
@@ -747,7 +830,7 @@ class LiveTrader:
         equity_curve: list[dict[str, Any]],
         fresh_symbols: set[str] | None = None,
     ) -> bool:
-        if self.config.mode != "live" or self.position or now.time() >= strategy.force_exit_clock:
+        if self.config.mode != "live" or now.time() >= strategy.force_exit_clock:
             return False
         entry_count = _live_buy_count_for_session(self.report_dir, now.date())
         if entry_count >= strategy.max_trades_per_day:
@@ -760,7 +843,22 @@ class LiveTrader:
                 max_trades_per_day=strategy.max_trades_per_day,
             )
             return False
-        symbols = [symbol for symbol in self.active_symbols if fresh_symbols is None or symbol in fresh_symbols]
+        if len(self.positions) >= self.config.max_positions:
+            self._set_trade_message(_max_positions_message(len(self.positions), self.config.max_positions))
+            self._log_decision(
+                "entry_skip",
+                now,
+                reason="max_positions",
+                positions=len(self.positions),
+                max_positions=self.config.max_positions,
+            )
+            return False
+        held_symbols = self._held_symbols()
+        symbols = [
+            symbol
+            for symbol in self.active_symbols
+            if symbol not in held_symbols and (fresh_symbols is None or symbol in fresh_symbols)
+        ]
         candidates = [
             candidate
             for symbol in symbols
@@ -771,7 +869,119 @@ class LiveTrader:
             return False
         candidates.sort(key=lambda item: item[0], reverse=True)
         _, bar, reason = candidates[0]
-        shares = _live_order_shares(self.cash, bar.close, strategy)
+        shares = _live_order_shares(
+            self.cash,
+            bar.close,
+            strategy,
+            self.config.max_positions,
+            self.strategy.initial_capital,
+        )
+        return self._submit_live_buy(client, now, strategy, bar, shares, reason, metrics, equity_curve)
+
+    def _can_open_position(self, symbol: str, now: datetime, strategy: StockScannerConfig) -> bool:
+        if symbol in self._held_symbols():
+            self._set_trade_message(f"{symbol}: 이미 보유 중")
+            self._log_decision("entry_skip", now, symbol=symbol, reason="already_held")
+            return False
+        if len(self.positions) >= self.config.max_positions:
+            self._set_trade_message(_max_positions_message(len(self.positions), self.config.max_positions))
+            self._log_decision(
+                "entry_skip",
+                now,
+                symbol=symbol,
+                reason="max_positions",
+                positions=len(self.positions),
+                max_positions=self.config.max_positions,
+            )
+            return False
+        entry_count = _live_buy_count_for_session(self.report_dir, now.date())
+        if entry_count >= strategy.max_trades_per_day:
+            self._set_trade_message(_daily_entry_limit_message(entry_count, strategy.max_trades_per_day))
+            self._log_decision(
+                "entry_skip",
+                now,
+                symbol=symbol,
+                reason="daily_trade_limit",
+                entries=entry_count,
+                max_trades_per_day=strategy.max_trades_per_day,
+            )
+            return False
+        return True
+
+    def _held_symbols(self) -> set[str]:
+        return {str(position.get("symbol") or "") for position in self.positions if position.get("symbol")}
+
+    def _position_for_symbol(self, symbol: str) -> dict[str, Any] | None:
+        symbol = str(symbol)
+        for position in self.positions:
+            if str(position.get("symbol") or "") == symbol:
+                return position
+        return None
+
+    def _try_live_direct_exit(
+        self,
+        client: KisClient,
+        now: datetime,
+        strategy: StockScannerConfig,
+        fresh_symbols: set[str] | None = None,
+    ) -> bool:
+        if self.config.mode != "live" or not self.positions:
+            return False
+        sold_any = False
+        for position in list(self.positions):
+            if self._try_live_direct_exit_position(client, now, strategy, position, fresh_symbols):
+                sold_any = True
+        return sold_any
+
+    def _try_live_direct_exit_position(
+        self,
+        client: KisClient,
+        now: datetime,
+        strategy: StockScannerConfig,
+        position: dict[str, Any],
+        fresh_symbols: set[str] | None = None,
+    ) -> bool:
+        symbol = str(position.get("symbol") or "")
+        shares = int(position.get("shares") or 0)
+        entry_price = float(position.get("entry_price") or 0.0)
+        if not symbol or shares <= 0 or entry_price <= 0:
+            return False
+        if fresh_symbols is not None and symbol not in fresh_symbols:
+            return False
+        latest = _latest_symbol_bar(self.bars, symbol, now.date())
+        if not latest:
+            return False
+        highest_price = max(float(position.get("highest_price") or entry_price), latest.close)
+        position["highest_price"] = highest_price
+        reason = ""
+        entry_date = _position_entry_date(position)
+        if entry_date and latest.session > entry_date:
+            reason = "live_overnight_force_exit"
+        elif now.time() >= strategy.force_exit_clock:
+            reason = "live_force_exit"
+        elif latest.close <= entry_price * (1.0 - strategy.stop_loss_pct):
+            reason = "live_stop_loss"
+        elif latest.close >= entry_price * (1.0 + strategy.take_profit_pct):
+            reason = "live_take_profit"
+        elif highest_price > entry_price and latest.close <= highest_price * (1.0 - strategy.trailing_stop_pct):
+            reason = "live_trailing_stop"
+        if not reason:
+            return False
+        return self._submit_live_sell(client, now, strategy, position, latest, reason)
+
+    def _submit_live_buy(
+        self,
+        client: KisClient,
+        now: datetime,
+        strategy: StockScannerConfig,
+        bar: StockBar,
+        shares: int,
+        reason: str,
+        metrics: dict[str, Any] | None = None,
+        equity_curve: list[dict[str, Any]] | None = None,
+        *,
+        trade_timestamp: datetime | None = None,
+    ) -> bool:
         if shares <= 0:
             self._set_trade_message(f"{bar.symbol}: 주문 가능 수량 없음")
             self._log_decision("entry_skip", now, symbol=bar.symbol, reason="no_orderable_shares", price=bar.close)
@@ -784,15 +994,17 @@ class LiveTrader:
         gross = shares * bar.close
         cost = gross * strategy.commission_rate
         self.cash = round(max(0.0, self.cash - gross - cost), 2)
-        self.position = {
-            "symbol": bar.symbol,
-            "shares": shares,
-            "entry_price": bar.close,
-            "highest_price": bar.close,
-            "entry_time": now.isoformat(sep=" "),
-        }
+        self.positions.append(
+            {
+                "symbol": bar.symbol,
+                "shares": shares,
+                "entry_price": bar.close,
+                "highest_price": bar.close,
+                "entry_time": (trade_timestamp or now).isoformat(sep=" "),
+            }
+        )
         trade = ScannerTrade(
-            timestamp=now,
+            timestamp=trade_timestamp or now,
             action="BUY",
             symbol=bar.symbol,
             shares=shares,
@@ -815,6 +1027,7 @@ class LiveTrader:
             reason=reason,
             response=response,
             cash_after=self.cash,
+            positions=[dict(position) for position in self.positions],
         )
         if equity_curve:
             _write_live_equity(equity_curve, self.report_dir)
@@ -825,41 +1038,20 @@ class LiveTrader:
             self.status["trade_message"] = f"최근 주문: BUY {trade.symbol} {trade.shares}주 ({trade.reason})"
         return True
 
-    def _try_live_direct_exit(
+    def _submit_live_sell(
         self,
         client: KisClient,
         now: datetime,
         strategy: StockScannerConfig,
-        fresh_symbols: set[str] | None = None,
+        position: dict[str, Any],
+        latest: StockBar,
+        reason: str,
+        *,
+        trade_timestamp: datetime | None = None,
     ) -> bool:
-        if self.config.mode != "live" or not self.position:
-            return False
-        symbol = str(self.position.get("symbol") or "")
-        shares = int(self.position.get("shares") or 0)
-        entry_price = float(self.position.get("entry_price") or 0.0)
-        if not symbol or shares <= 0 or entry_price <= 0:
-            return False
-        if fresh_symbols is not None and symbol not in fresh_symbols:
-            return False
-        latest = _latest_symbol_bar(self.bars, symbol, now.date())
-        if not latest:
-            return False
-        highest_price = max(float(self.position.get("highest_price") or entry_price), latest.close)
-        self.position["highest_price"] = highest_price
-        reason = ""
-        entry_date = _position_entry_date(self.position)
-        if entry_date and latest.session > entry_date:
-            reason = "live_overnight_force_exit"
-        elif now.time() >= strategy.force_exit_clock:
-            reason = "live_force_exit"
-        elif latest.close <= entry_price * (1.0 - strategy.stop_loss_pct):
-            reason = "live_stop_loss"
-        elif latest.close >= entry_price * (1.0 + strategy.take_profit_pct):
-            reason = "live_take_profit"
-        elif highest_price > entry_price and latest.close <= highest_price * (1.0 - strategy.trailing_stop_pct):
-            reason = "live_trailing_stop"
-        if not reason:
-            return False
+        symbol = str(position.get("symbol") or "")
+        shares = int(position.get("shares") or 0)
+        entry_price = float(position.get("entry_price") or 0.0)
         response = self._place_order(client, "sell", symbol, shares, live=True, price=latest.close)
         if not _order_succeeded(response, True):
             self._set_trade_message(f"주문 실패: SELL {symbol} ({_order_message(response)})")
@@ -869,9 +1061,9 @@ class LiveTrader:
         cost = gross * (strategy.commission_rate + strategy.sell_tax_rate)
         realized_pnl = gross - cost - (entry_price * shares)
         self.cash = round(self.cash + gross - cost, 2)
-        self.position = None
+        self.positions = [current for current in self.positions if current is not position and current.get("symbol") != symbol]
         trade = ScannerTrade(
-            timestamp=now,
+            timestamp=trade_timestamp or now,
             action="SELL_ALL",
             symbol=symbol,
             shares=shares,
@@ -894,6 +1086,7 @@ class LiveTrader:
             reason=reason,
             response=response,
             cash_after=self.cash,
+            positions=[dict(position) for position in self.positions],
         )
         with self.lock:
             self.status["orders"] = int(self.status.get("orders", 0)) + 1
@@ -1008,6 +1201,8 @@ class LiveTrader:
         entry_count = _live_buy_count_for_session(self.report_dir, now.date())
         if entry_count >= strategy.max_trades_per_day:
             return _daily_entry_limit_message(entry_count, strategy.max_trades_per_day)
+        if len(self.positions) >= self.config.max_positions:
+            return _max_positions_message(len(self.positions), self.config.max_positions)
 
         reasons: list[tuple[str, str]] = []
         for symbol in self.active_symbols:
@@ -1281,13 +1476,23 @@ def _last_trade_key(report_dir: Path) -> str:
     return rows[-1].get("trade_key", "") if rows else ""
 
 
-def _open_position_from_trades(report_dir: Path) -> tuple[dict[str, Any] | None, float]:
+def _trade_key_exists(report_dir: Path, trade_key: str) -> bool:
+    if not trade_key:
+        return False
     path = report_dir / "trades.csv"
     if not path.exists():
-        return None, 0.0
+        return False
+    with path.open(newline="", encoding="utf-8") as csv_file:
+        return any(row.get("trade_key", "") == trade_key for row in csv.DictReader(csv_file))
+
+
+def _open_positions_from_trades(report_dir: Path) -> tuple[list[dict[str, Any]], float]:
+    path = report_dir / "trades.csv"
+    if not path.exists():
+        return [], 0.0
     with path.open(newline="", encoding="utf-8") as csv_file:
         rows = list(csv.DictReader(csv_file))
-    position: dict[str, Any] | None = None
+    positions: dict[str, dict[str, Any]] = {}
     cash = 0.0
     for row in rows:
         action = str(row.get("action") or "").upper()
@@ -1298,16 +1503,21 @@ def _open_position_from_trades(report_dir: Path) -> tuple[dict[str, Any] | None,
         if cash_after > 0:
             cash = cash_after
         if action == "BUY" and symbol and shares > 0 and price > 0:
-            position = {
+            positions[symbol] = {
                 "symbol": symbol,
                 "shares": shares,
                 "entry_price": price,
                 "highest_price": price,
                 "entry_time": str(row.get("timestamp") or ""),
             }
-        elif action.startswith("SELL") and position and symbol == position.get("symbol"):
-            position = None
-    return position, cash
+        elif action.startswith("SELL") and symbol:
+            positions.pop(symbol, None)
+    return list(positions.values()), cash
+
+
+def _open_position_from_trades(report_dir: Path) -> tuple[dict[str, Any] | None, float]:
+    positions, cash = _open_positions_from_trades(report_dir)
+    return (positions[0] if positions else None), cash
 
 
 def _live_buy_count_for_session(report_dir: Path, session: object) -> int:
@@ -1328,6 +1538,16 @@ def _live_buy_count_for_session(report_dir: Path, session: object) -> int:
 
 def _daily_entry_limit_message(entry_count: int, max_trades_per_day: int) -> str:
     return f"일일 진입 한도 도달 ({entry_count}/{max_trades_per_day}회)"
+
+
+def _max_positions_message(position_count: int, max_positions: int) -> str:
+    return f"최대 동시보유 도달 ({position_count}/{max_positions}종목)"
+
+
+def _positions_summary(positions: list[dict[str, Any]]) -> str:
+    if not positions:
+        return "없음"
+    return ", ".join(f"{position.get('symbol')} {position.get('shares')}주" for position in positions)
 
 
 def _write_live_equity(rows: list[dict[str, Any]], report_dir: Path) -> None:
@@ -1360,6 +1580,9 @@ def _idle_status(market: str = DEFAULT_MARKET) -> dict[str, Any]:
         "seed_source": config.seed_source,
         "auto_start": config.auto_start,
         "symbol": config.symbol,
+        "max_positions": config.max_positions,
+        "position": {},
+        "positions": [],
         "exchange_code": config.exchange_code,
         "price_exchange_code": config.price_exchange_code,
         "currency": config.currency,
@@ -1590,13 +1813,22 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _live_order_shares(cash: float, price: float, strategy: StockScannerConfig) -> int:
+def _live_order_shares(
+    cash: float,
+    price: float,
+    strategy: StockScannerConfig,
+    max_positions: int = 1,
+    capital_base: float | None = None,
+) -> int:
     if cash <= 0 or price <= 0:
         return 0
-    risk_budget = cash * strategy.risk_per_trade_pct
+    max_positions = max(1, int(max_positions))
+    capital_base = capital_base if capital_base and capital_base > 0 else cash
+    slot_cap = capital_base / max_positions
+    risk_budget = slot_cap * strategy.risk_per_trade_pct
     risk_cap = risk_budget / strategy.stop_loss_pct if strategy.stop_loss_pct > 0 else cash
-    position_cap = cash * strategy.max_position_pct
-    budget = min(cash, risk_cap, position_cap)
+    position_cap = capital_base * min(strategy.max_position_pct, 1.0 / max_positions)
+    budget = min(cash, slot_cap, risk_cap, position_cap)
     cost_per_share = price * (1.0 + strategy.commission_rate + strategy.slippage_rate)
     return math.floor(budget / cost_per_share) if cost_per_share > 0 else 0
 

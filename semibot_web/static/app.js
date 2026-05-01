@@ -243,6 +243,7 @@ async function loadLiveConfig() {
   $("currency").value = config.currency || markets[state.activeMarket].currency;
   $("overseasPremarketEnabled").checked = Boolean(config.overseas_premarket_enabled);
   $("seedCapital").value = Math.round(Number(config.seed_capital || 1000000));
+  $("maxPositions").value = Number(config.max_positions || 3);
   $("seedBalanceMax").checked = config.seed_source === "balance_max";
   $("autoStartTrading").checked = Boolean(config.auto_start);
   renderMarketFields();
@@ -254,6 +255,7 @@ function liveConfigPayload() {
   if (!Number.isFinite(seed) || seed <= 0) {
     throw new Error("시드는 0보다 큰 금액으로 입력하세요.");
   }
+  const maxPositions = Math.max(1, Math.floor(Number($("maxPositions").value || 3)));
   return {
     market: state.activeMarket,
     mode: $("liveMode").value,
@@ -264,6 +266,7 @@ function liveConfigPayload() {
     currency: $("currency").value.trim().toUpperCase() || markets[state.activeMarket].currency,
     overseas_premarket_enabled: $("overseasPremarketEnabled").checked,
     seed_capital: seed,
+    max_positions: maxPositions,
     seed_source: $("seedBalanceMax").checked ? "balance_max" : "manual",
     auto_start: $("autoStartTrading").checked,
     auto_select: true,
@@ -284,14 +287,16 @@ async function saveLiveConfig(confirmAutoStart = true) {
   const target = state.activeMarket === "overseas"
     ? `${config.overseas_premarket_enabled ? "프리장 포함 " : ""}NASDAQ 자동선별`
     : "시장 자동선별";
-  $("liveStatus").textContent = `${marketLabel()} 설정 저장됨: ${config.mode}, 시드 ${seedText}, 자동시작 ${config.auto_start ? "켜짐" : "꺼짐"}, ${target}`;
+  $("liveStatus").textContent = `${marketLabel()} 설정 저장됨: ${config.mode}, 시드 ${seedText}, 동시보유 최대 ${config.max_positions || 3}종목, 자동시작 ${config.auto_start ? "켜짐" : "꺼짐"}, ${target}`;
   return config;
 }
 
 async function loadLiveStatus() {
   const status = await getJSON(apiPath("/api/live/status"));
   const position = status.position || {};
+  const positions = Array.isArray(status.positions) ? status.positions : (position.symbol ? [position] : []);
   const activeSymbols = status.active_symbols || [];
+  const maxPositions = Number(status.max_positions || $("maxPositions").value || 3);
   const pieces = [
     `${marketLabel()} ${status.running ? "실행 중" : "대기 중"}`,
     `모드: ${status.mode || $("liveMode").value || "paper"}`,
@@ -299,6 +304,7 @@ async function loadLiveStatus() {
     `자동시작: ${status.auto_start ? "켜짐" : "꺼짐"}`,
     `선별: ${status.selector_message || status.selector || "-"}`,
     `추적: ${activeSymbols.length}종목`,
+    `동시보유: ${positions.length}/${maxPositions}종목`,
     `5분봉: ${Number(status.bar_count || 0).toLocaleString("ko-KR")}개`,
     `주문기록: ${Number(status.orders || 0).toLocaleString("ko-KR")}건`,
   ];
@@ -313,7 +319,9 @@ async function loadLiveStatus() {
   }
   if (status.session_label) pieces.push(`세션: ${status.session_label}`);
   if (status.last_tick) pieces.push(`최근: ${status.last_tick}`);
-  if (position.symbol) pieces.push(`보유: ${position.symbol} ${position.shares}주`);
+  if (positions.length) {
+    pieces.push(`보유: ${positions.map((item) => `${item.symbol} ${item.shares}주`).join(", ")}`);
+  }
   if (status.last_error) pieces.push(`오류: ${status.last_error}`);
   $("liveStatus").textContent = pieces.join(" / ");
   $("tradeReasonStatus").textContent = `매수대기 사유: ${status.trade_message || "-"}`;
