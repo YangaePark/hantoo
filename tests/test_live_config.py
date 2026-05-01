@@ -304,6 +304,26 @@ class LiveConfigTests(unittest.TestCase):
         self.assertIn("Temporary failure", status["last_error"])
         self.assertEqual(status["active_symbols"], ["005930"])
 
+    def test_startup_token_is_checked_before_market_cycle(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trader = LiveTrader(
+                LiveConfig.from_dict({"market": "overseas"}),
+                StockScannerConfig(),
+                report_dir=Path(tmpdir),
+            )
+            client = FakeStartupTokenClient()
+            now = datetime(2026, 4, 30, 3, 0)
+
+            trader._ensure_startup_token(client, now)
+            trader._ensure_startup_token(client, now)
+
+            status = trader.snapshot()
+            logs = _read_decision_logs(Path(tmpdir))
+            self.assertEqual(client.token_checks, 1)
+            self.assertTrue(trader.startup_token_checked)
+            self.assertEqual(status["token_status"], "확인 완료")
+            self.assertTrue(any(row["event"] == "token_ready" for row in logs))
+
     def test_live_direct_entry_orders_when_backtester_has_no_breakout_trade(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             strategy = replace(
@@ -567,6 +587,17 @@ class FakeDomesticOrderClient:
     def order_cash(self, **kwargs):
         self.orders.append(kwargs)
         return {"rt_cd": "0", "msg1": "정상"}
+
+
+class FakeStartupTokenClient:
+    access_token_expires_at = "2026-05-01T12:00:00+00:00"
+
+    def __init__(self):
+        self.token_checks = 0
+
+    def ensure_token(self):
+        self.token_checks += 1
+        return "startup-token"
 
 
 def _read_decision_logs(report_dir: Path):

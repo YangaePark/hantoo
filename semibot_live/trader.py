@@ -193,6 +193,8 @@ class LiveTrader:
             "bar_min_ready": 0,
             "bar_counts": {},
             "price_error_count": 0,
+            "token_status": "대기",
+            "token_expires_at": "",
             "trade_message": "매수 조건 대기",
         }
         self.bars: list[StockBar] = []
@@ -202,6 +204,7 @@ class LiveTrader:
         self.selected_since: dict[str, float] = {}
         self.last_selection_at = 0.0
         self.regular_reset_dates: set[object] = set()
+        self.startup_token_checked = False
         self.position: dict[str, Any] | None = None
         self.cash = strategy.initial_capital
         self.day_start_cash = strategy.initial_capital
@@ -236,6 +239,7 @@ class LiveTrader:
             while self.running:
                 now = datetime.now()
                 try:
+                    self._ensure_startup_token(client, now)
                     self._run_cycle(client, now)
                     time.sleep(max(1, self.config.poll_interval_sec))
                 except Exception as exc:  # noqa: BLE001
@@ -248,6 +252,21 @@ class LiveTrader:
             with self.lock:
                 self.status["running"] = False
             self.running = False
+
+    def _ensure_startup_token(self, client: KisClient, now: datetime) -> None:
+        if self.startup_token_checked:
+            return
+        client.ensure_token()
+        self.startup_token_checked = True
+        token_expires_at = getattr(client, "access_token_expires_at", "")
+        with self.lock:
+            self.status.update(
+                {
+                    "token_status": "확인 완료",
+                    "token_expires_at": token_expires_at,
+                }
+            )
+        self._log_decision("token_ready", now, token_expires_at=token_expires_at)
 
     def _run_cycle(self, client: KisClient, now: datetime) -> None:
         strategy_now = self._strategy_now(now)
@@ -1253,6 +1272,8 @@ def _idle_status(market: str = DEFAULT_MARKET) -> dict[str, Any]:
         "bar_min_ready": 0,
         "bar_counts": {},
         "price_error_count": 0,
+        "token_status": "대기",
+        "token_expires_at": "",
         "trade_message": "자동매매 시작 전",
     }
 

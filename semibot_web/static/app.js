@@ -308,6 +308,9 @@ async function loadLiveStatus() {
   if (status.price_error_count) {
     pieces.push(`현재가 실패: ${Number(status.price_error_count).toLocaleString("ko-KR")}종목`);
   }
+  if (status.token_status && status.token_status !== "대기") {
+    pieces.push(`토큰: ${status.token_status}`);
+  }
   if (status.session_label) pieces.push(`세션: ${status.session_label}`);
   if (status.last_tick) pieces.push(`최근: ${status.last_tick}`);
   if (position.symbol) pieces.push(`보유: ${position.symbol} ${position.shares}주`);
