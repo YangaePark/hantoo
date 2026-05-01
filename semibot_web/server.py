@@ -4,6 +4,7 @@ import csv
 import json
 import mimetypes
 import os
+from collections import deque
 from dataclasses import replace
 from datetime import datetime
 from http import HTTPStatus
@@ -68,6 +69,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json(load_live_config(_market_from_query(parsed)).to_dict())
         elif parsed.path == "/api/live/status":
             self._json(live_status(_market_from_query(parsed)))
+        elif parsed.path == "/api/live/decisions":
+            self._json(load_live_decisions(_market_from_query(parsed), _limit_from_query(parsed)))
         else:
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -207,6 +210,28 @@ def load_report(name: str) -> dict:
         "trades": trades,
         "equity_curve": equity,
         "current": current_snapshot(metrics, trades, equity),
+    }
+
+
+def load_live_decisions(market: str = DEFAULT_MARKET, limit: int = 80) -> dict:
+    market = _market(market)
+    report_dir = live_report_dir(market)
+    path = report_dir / "decision_log.jsonl"
+    rows: deque[dict] = deque(maxlen=max(1, min(200, limit)))
+    if path.exists():
+        with path.open(encoding="utf-8") as log_file:
+            for line in log_file:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    rows.append({"event": "parse_error", "message": line[:200]})
+    return {
+        "market": market,
+        "report": report_dir.name,
+        "decisions": list(rows),
     }
 
 
@@ -392,6 +417,14 @@ def _overseas_zero_balance_message(parsed: dict) -> str:
 
 def _market_from_query(parsed) -> str:
     return _market(parse_qs(parsed.query).get("market", [DEFAULT_MARKET])[0])
+
+
+def _limit_from_query(parsed, default: int = 80) -> int:
+    raw = parse_qs(parsed.query).get("limit", [str(default)])[0]
+    try:
+        return max(1, min(200, int(raw)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _market_from_payload(payload: dict, parsed) -> str:

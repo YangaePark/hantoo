@@ -195,16 +195,6 @@ button.danger {
   line-height: 1.4;
 }
 
-.reason-status {
-  margin: -4px 0 2px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
-  color: #dfe8f6;
-  font-size: 12px;
-  line-height: 1.45;
-}
-
 .balance-grid {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -300,6 +290,67 @@ canvas {
   display: block;
 }
 
+.decision-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.decision-current {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid #d9e2f2;
+  border-radius: 6px;
+  background: #f8fbff;
+}
+
+.decision-current span,
+.decision-time,
+.decision-event,
+.decision-detail {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.decision-current strong {
+  line-height: 1.5;
+  font-size: 16px;
+}
+
+.decision-history {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.decision-item {
+  display: grid;
+  grid-template-columns: 150px 128px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.decision-event {
+  font-weight: 700;
+}
+
+.decision-message {
+  min-width: 0;
+  line-height: 1.45;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.decision-detail {
+  margin-top: 3px;
+}
+
 .table-wrap {
   overflow: auto;
   max-height: 420px;
@@ -370,5 +421,10 @@ td:last-child {
 
   .status {
     text-align: left;
+  }
+
+  .decision-item {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 }

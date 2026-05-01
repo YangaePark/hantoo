@@ -42,6 +42,15 @@ function number(value) {
   return Number(value || 0).toLocaleString("ko-KR", { maximumFractionDigits: 2 });
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 async function loadReports() {
   const data = await getJSON("/api/reports");
   state.reports = data.reports;
@@ -324,8 +333,113 @@ async function loadLiveStatus() {
   }
   if (status.last_error) pieces.push(`오류: ${status.last_error}`);
   $("liveStatus").textContent = pieces.join(" / ");
-  $("tradeReasonStatus").textContent = `매수대기 사유: ${status.trade_message || "-"}`;
+  renderCurrentDecision(status);
   return status;
+}
+
+function renderCurrentDecision(status) {
+  const message = status.trade_message || "-";
+  const meta = [
+    marketLabel(),
+    status.session_label || "",
+    status.last_tick ? `최근 ${status.last_tick}` : "",
+  ].filter(Boolean);
+  $("decisionCurrent").textContent = message;
+  $("decisionMeta").textContent = meta.join(" / ") || "대기 중";
+}
+
+async function loadDecisionHistory() {
+  const data = await getJSON(`${apiPath("/api/live/decisions")}&limit=80`, { cache: "no-store" });
+  renderDecisionHistory(data.decisions || []);
+  return data;
+}
+
+function renderDecisionHistory(decisions) {
+  const rows = decisions.slice().reverse();
+  $("decisionHistory").innerHTML = rows.length
+    ? rows.map((decision) => decisionRowHTML(decision)).join("")
+    : `<div class="decision-item"><div class="decision-message">아직 기록된 판단 로그가 없습니다.</div></div>`;
+}
+
+function decisionRowHTML(decision) {
+  const detail = decisionDetail(decision);
+  return `<div class="decision-item">
+    <div class="decision-time">${escapeHtml(decision.timestamp || "-")}</div>
+    <div class="decision-event">${escapeHtml(decisionEventLabel(decision.event))}</div>
+    <div class="decision-message">
+      ${escapeHtml(decisionMessage(decision))}
+      ${detail ? `<div class="decision-detail">${escapeHtml(detail)}</div>` : ""}
+    </div>
+  </div>`;
+}
+
+function decisionEventLabel(event) {
+  const labels = {
+    cycle: "주기 점검",
+    entry_rejected: "진입 보류",
+    entry_skip: "진입 제외",
+    order_submitted: "주문 제출",
+    order_failed: "주문 실패",
+    market_wait: "시장 대기",
+    token_ready: "토큰 확인",
+    error: "오류",
+    parse_error: "로그 오류",
+  };
+  return labels[event] || event || "-";
+}
+
+function decisionMessage(decision) {
+  if (decision.event === "cycle") {
+    return decision.trade_message || "상태 점검";
+  }
+  if (decision.event === "entry_rejected") {
+    const rejected = Array.isArray(decision.rejected) ? decision.rejected : [];
+    if (!rejected.length) return "매수 조건을 만족한 종목 없음";
+    return rejected.slice(0, 5).map((item) => `${item.symbol}: ${item.reason}`).join(" / ");
+  }
+  if (decision.event === "entry_skip") {
+    const symbol = decision.symbol ? `${decision.symbol}: ` : "";
+    return `${symbol}${decision.reason || "진입 제외"}`;
+  }
+  if (decision.event === "order_submitted" || decision.event === "order_failed") {
+    const side = decision.side ? String(decision.side).toUpperCase() : "ORDER";
+    const symbol = decision.symbol || "";
+    const shares = decision.shares ? `${decision.shares}주` : "";
+    const price = decision.price ? `@ ${number(decision.price)}` : "";
+    const reason = decision.reason ? `(${decision.reason})` : "";
+    return [side, symbol, shares, price, reason].filter(Boolean).join(" ");
+  }
+  if (decision.event === "market_wait") return decision.reason || "시장 대기";
+  if (decision.event === "token_ready") return "Access Token 확인 완료";
+  if (decision.event === "error") return decision.error || "오류 발생";
+  return decision.message || decision.reason || decision.event || "-";
+}
+
+function decisionDetail(decision) {
+  if (decision.event === "cycle") {
+    const active = Array.isArray(decision.active_symbols) ? decision.active_symbols.length : 0;
+    const positions = Array.isArray(decision.positions) ? decision.positions.length : (decision.position?.symbol ? 1 : 0);
+    const errors = Array.isArray(decision.price_errors) ? decision.price_errors.length : 0;
+    return `추적 ${active}종목 / 보유 ${positions}종목 / 현재가 실패 ${errors}건`;
+  }
+  if (decision.event === "entry_rejected" && Array.isArray(decision.rejected) && decision.rejected.length > 5) {
+    return `외 ${decision.rejected.length - 5}종목`;
+  }
+  if (decision.event === "entry_skip" && decision.reason === "daily_trade_limit") {
+    return `오늘 진입 ${decision.entries || 0}/${decision.max_trades_per_day || "-"}회`;
+  }
+  if (decision.event === "entry_skip" && decision.reason === "max_positions") {
+    return `동시보유 ${decision.positions || 0}/${decision.max_positions || "-"}종목`;
+  }
+  if (decision.event === "order_failed") {
+    return orderResponseMessage(decision.response);
+  }
+  return "";
+}
+
+function orderResponseMessage(response) {
+  if (!response || typeof response !== "object") return "";
+  return response.msg1 || response.msg_cd || JSON.stringify(response);
 }
 
 async function startLive() {
@@ -346,7 +460,7 @@ async function startLive() {
   } else {
     await loadLiveStatus();
   }
-  await loadReports();
+  await Promise.all([loadReports(), loadDecisionHistory()]);
 }
 
 async function stopLive() {
@@ -355,7 +469,7 @@ async function stopLive() {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ market: state.activeMarket }),
   });
-  await loadLiveStatus();
+  await Promise.all([loadLiveStatus(), loadDecisionHistory()]);
 }
 
 async function refreshBalance() {
@@ -436,7 +550,7 @@ async function switchMarket(market) {
     button.setAttribute("aria-selected", active ? "true" : "false");
   });
   renderMarketFields();
-  await Promise.all([loadKeyStatus(), loadLiveConfig(), loadLiveStatus(), loadReports()]);
+  await Promise.all([loadKeyStatus(), loadLiveConfig(), loadLiveStatus(), loadReports(), loadDecisionHistory()]);
 }
 
 window.addEventListener("resize", () => {
@@ -481,11 +595,11 @@ $("seedBalanceMax").addEventListener("change", () => {
 });
 
 renderMarketFields();
-Promise.all([loadReports(), loadKeyStatus(), loadLiveConfig(), loadLiveStatus()]).catch((error) => {
+Promise.all([loadReports(), loadKeyStatus(), loadLiveConfig(), loadLiveStatus(), loadDecisionHistory()]).catch((error) => {
   console.error(error);
   alert(error.message);
 });
 
 state.liveTimer = window.setInterval(() => {
-  loadLiveStatus().catch((error) => console.error(error));
+  Promise.all([loadLiveStatus(), loadDecisionHistory()]).catch((error) => console.error(error));
 }, 5000);
