@@ -8,6 +8,7 @@ const state = {
 };
 
 const BALANCE_REFRESH_MS = 60_000;
+const MOBILE_QUERY = "(max-width: 760px)";
 
 const $ = (id) => document.getElementById(id);
 const markets = {
@@ -110,13 +111,13 @@ function renderTrades(trades) {
     .map((trade) => {
       const pnl = Number(trade.realized_pnl || 0);
       return `<tr>
-        <td>${trade.timestamp || trade.date || ""}</td>
-        <td>${trade.action || ""}</td>
-        <td>${trade.symbol || ""}</td>
-        <td>${number(trade.shares)}</td>
-        <td>${number(trade.price)}</td>
-        <td class="${pnl >= 0 ? "good" : "bad"}">${number(pnl)}</td>
-        <td>${trade.reason || ""}</td>
+        <td data-label="시간">${trade.timestamp || trade.date || ""}</td>
+        <td data-label="구분">${trade.action || ""}</td>
+        <td data-label="종목">${trade.symbol || ""}</td>
+        <td data-label="수량">${number(trade.shares)}</td>
+        <td data-label="가격">${number(trade.price)}</td>
+        <td data-label="실현손익" class="${pnl >= 0 ? "good" : "bad"}">${number(pnl)}</td>
+        <td data-label="사유">${trade.reason || ""}</td>
       </tr>`;
     })
     .join("");
@@ -558,6 +559,21 @@ function marketMoney(value) {
   return money(value, marketCurrency());
 }
 
+function setupMobilePanels() {
+  const media = window.matchMedia(MOBILE_QUERY);
+  const syncPanels = () => {
+    document.querySelectorAll("[data-mobile-default='closed']").forEach((panel) => {
+      panel.open = !media.matches;
+    });
+  };
+  syncPanels();
+  if (media.addEventListener) {
+    media.addEventListener("change", syncPanels);
+  } else {
+    media.addListener(syncPanels);
+  }
+}
+
 function renderMarketFields() {
   const overseas = state.activeMarket === "overseas";
   document.querySelectorAll(".overseas-only").forEach((element) => {
@@ -616,6 +632,7 @@ $("seedBalanceMax").addEventListener("change", () => {
   }
 });
 
+setupMobilePanels();
 renderMarketFields();
 Promise.all([loadReports(), loadKeyStatus(), loadLiveConfig(), loadLiveStatus(), loadDecisionHistory()])
   .then(() => refreshBalance({ silent: true }).catch((error) => console.error(error)))

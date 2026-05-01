@@ -12,7 +12,7 @@
         <strong>Semibot</strong>
         <span>System Trading Lab</span>
       </div>
-      <label class="field">
+      <label class="field report-field">
         <span>리포트</span>
         <select id="reportSelect"></select>
       </label>
@@ -21,52 +21,63 @@
         <button type="button" class="active" data-market-tab="domestic" role="tab" aria-selected="true">국내</button>
         <button type="button" data-market-tab="overseas" role="tab" aria-selected="false">해외</button>
       </div>
-      <section class="keys">
-        <h2>한국투자 API</h2>
-        <p id="keyStatus">확인 중</p>
+      <details class="keys collapsible-section api-panel" data-mobile-default="closed" open>
+        <summary>
+          <span>한국투자 API</span>
+          <small id="keyStatus">확인 중</small>
+        </summary>
         <input id="appKey" placeholder="App Key" autocomplete="off" />
         <input id="appSecret" placeholder="App Secret" type="password" autocomplete="off" />
         <input id="accessToken" placeholder="Access Token (있으면 입력)" type="password" autocomplete="off" />
         <input id="baseUrl" placeholder="Base URL" />
         <button id="saveKeysButton">키 저장</button>
-      </section>
-      <section class="keys live-controls">
-        <h2>자동매매</h2>
-        <p id="liveStatus">대기 중</p>
-        <label class="field">
-          <span>모드</span>
-          <select id="liveMode">
-            <option value="paper">모의 실행</option>
-            <option value="live">실전 주문</option>
-          </select>
-        </label>
-        <input id="accountNo" placeholder="계좌번호 앞 8자리" autocomplete="off" />
-        <input id="productCode" placeholder="상품코드 예: 01" autocomplete="off" />
-        <div class="overseas-grid overseas-only" hidden>
-          <input id="exchangeCode" placeholder="주문 거래소 예: NASD" autocomplete="off" />
-          <input id="priceExchangeCode" placeholder="시세 거래소 예: NAS" autocomplete="off" />
-          <input id="currency" placeholder="통화 예: USD" autocomplete="off" />
-        </div>
-        <label class="check-row overseas-only" hidden>
-          <input id="overseasPremarketEnabled" type="checkbox" />
-          <span>프리장 자동선별 포함</span>
-        </label>
-        <label class="field">
-          <span>시드</span>
-          <input id="seedCapital" placeholder="예: 1000000" type="number" min="10000" step="10000" inputmode="numeric" />
-        </label>
-        <label class="field">
-          <span>최대 동시보유</span>
-          <input id="maxPositions" type="number" min="1" max="10" step="1" inputmode="numeric" />
-        </label>
-        <label class="check-row">
-          <input id="seedBalanceMax" type="checkbox" />
-          <span>통장 잔고 최대로 사용</span>
-        </label>
-        <label class="check-row">
-          <input id="autoStartTrading" type="checkbox" />
-          <span>서버 시작 시 자동매매 자동 시작</span>
-        </label>
+      </details>
+      <details class="keys live-controls collapsible-section" open>
+        <summary>
+          <span>자동매매</span>
+          <small id="liveStatus">대기 중</small>
+        </summary>
+        <details class="advanced-config collapsible-section" data-mobile-default="closed" open>
+          <summary>
+            <span>상세 설정</span>
+            <small>모드, 계좌, 시드</small>
+          </summary>
+          <label class="field">
+            <span>모드</span>
+            <select id="liveMode">
+              <option value="paper">모의 실행</option>
+              <option value="live">실전 주문</option>
+            </select>
+          </label>
+          <input id="accountNo" placeholder="계좌번호 앞 8자리" autocomplete="off" />
+          <input id="productCode" placeholder="상품코드 예: 01" autocomplete="off" />
+          <div class="overseas-grid overseas-only" hidden>
+            <input id="exchangeCode" placeholder="주문 거래소 예: NASD" autocomplete="off" />
+            <input id="priceExchangeCode" placeholder="시세 거래소 예: NAS" autocomplete="off" />
+            <input id="currency" placeholder="통화 예: USD" autocomplete="off" />
+          </div>
+          <label class="check-row overseas-only" hidden>
+            <input id="overseasPremarketEnabled" type="checkbox" />
+            <span>프리장 자동선별 포함</span>
+          </label>
+          <label class="field">
+            <span>시드</span>
+            <input id="seedCapital" placeholder="예: 1000000" type="number" min="10000" step="10000" inputmode="numeric" />
+          </label>
+          <label class="field">
+            <span>최대 동시보유</span>
+            <input id="maxPositions" type="number" min="1" max="10" step="1" inputmode="numeric" />
+          </label>
+          <label class="check-row">
+            <input id="seedBalanceMax" type="checkbox" />
+            <span>통장 잔고 최대로 사용</span>
+          </label>
+          <label class="check-row">
+            <input id="autoStartTrading" type="checkbox" />
+            <span>서버 시작 시 자동매매 자동 시작</span>
+          </label>
+          <button id="saveLiveConfigButton">설정 저장</button>
+        </details>
         <div class="balance-box">
           <div class="balance-head">
             <span id="balanceTitle">실계좌 잔고</span>
@@ -80,10 +91,9 @@
             <span>손익</span><strong id="balancePnl">-</strong>
           </div>
         </div>
-        <button id="saveLiveConfigButton">설정 저장</button>
         <button id="startLiveButton" class="primary">자동매매 시작</button>
         <button id="stopLiveButton" class="danger">중지</button>
-      </section>
+      </details>
     </aside>
 
     <main>
