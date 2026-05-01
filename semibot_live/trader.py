@@ -209,6 +209,12 @@ class LiveTrader:
         self.cash = strategy.initial_capital
         self.day_start_cash = strategy.initial_capital
         ensure_live_report(self.report_dir, strategy_name=_strategy_name(self.market))
+        restored_position, restored_cash = _open_position_from_trades(self.report_dir)
+        if restored_position:
+            self.position = restored_position
+            if restored_cash > 0:
+                self.cash = restored_cash
+            self.status["trade_message"] = f"기존 보유 복원: {restored_position['symbol']} {restored_position['shares']}주"
 
     def start(self) -> None:
         if self.running:
@@ -283,7 +289,7 @@ class LiveTrader:
             self.active_symbols = self._select_symbols(client)
         price_errors = []
         updated_symbols: set[str] = set()
-        for symbol in self.active_symbols:
+        for symbol in self._symbols_to_poll():
             try:
                 parsed = self._fetch_price(client, symbol)
             except Exception as exc:  # noqa: BLE001
@@ -349,6 +355,7 @@ class LiveTrader:
             session=SESSION_CLOSED,
             reason=message,
             active_symbols=list(self.active_symbols),
+            position=self.position or {},
         )
 
     def _record_retriable_error(self, exc: Exception, now: datetime) -> None:
@@ -617,12 +624,19 @@ class LiveTrader:
             return 0
         return max(0, cumulative_volume - previous)
 
+    def _symbols_to_poll(self) -> list[str]:
+        symbols = list(self.active_symbols)
+        position_symbol = str((self.position or {}).get("symbol") or "")
+        if position_symbol and position_symbol not in symbols:
+            symbols.insert(0, position_symbol)
+        return symbols
+
     def _bar_collection_status(self, now: datetime) -> dict[str, Any]:
         strategy = self._active_strategy(now)
         min_ready = self._direct_entry_profile(now, strategy).min_bars
         by_symbol: dict[str, int] = {}
         latest_by_symbol: dict[str, str] = {}
-        for symbol in self.active_symbols:
+        for symbol in self._symbols_to_poll():
             current_bars = sorted(
                 (bar for bar in self.bars if bar.symbol == symbol and bar.session == now.date()),
                 key=lambda bar: bar.timestamp,
@@ -696,6 +710,7 @@ class LiveTrader:
                 "shares": latest_trade.shares,
                 "entry_price": latest_trade.price,
                 "highest_price": latest_trade.price,
+                "entry_time": latest_trade.timestamp.isoformat(sep=" "),
             }
         else:
             response = self._place_order(client, "sell", latest_trade.symbol, latest_trade.shares, live, latest_trade.price)
@@ -746,7 +761,13 @@ class LiveTrader:
         gross = shares * bar.close
         cost = gross * strategy.commission_rate
         self.cash = round(max(0.0, self.cash - gross - cost), 2)
-        self.position = {"symbol": bar.symbol, "shares": shares, "entry_price": bar.close, "highest_price": bar.close}
+        self.position = {
+            "symbol": bar.symbol,
+            "shares": shares,
+            "entry_price": bar.close,
+            "highest_price": bar.close,
+            "entry_time": now.isoformat(sep=" "),
+        }
         trade = ScannerTrade(
             timestamp=now,
             action="BUY",
@@ -803,7 +824,10 @@ class LiveTrader:
         highest_price = max(float(self.position.get("highest_price") or entry_price), latest.close)
         self.position["highest_price"] = highest_price
         reason = ""
-        if now.time() >= strategy.force_exit_clock:
+        entry_date = _position_entry_date(self.position)
+        if entry_date and latest.session > entry_date:
+            reason = "live_overnight_force_exit"
+        elif now.time() >= strategy.force_exit_clock:
             reason = "live_force_exit"
         elif latest.close <= entry_price * (1.0 - strategy.stop_loss_pct):
             reason = "live_stop_loss"
@@ -1231,6 +1255,35 @@ def _last_trade_key(report_dir: Path) -> str:
     return rows[-1].get("trade_key", "") if rows else ""
 
 
+def _open_position_from_trades(report_dir: Path) -> tuple[dict[str, Any] | None, float]:
+    path = report_dir / "trades.csv"
+    if not path.exists():
+        return None, 0.0
+    with path.open(newline="", encoding="utf-8") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    position: dict[str, Any] | None = None
+    cash = 0.0
+    for row in rows:
+        action = str(row.get("action") or "").upper()
+        symbol = str(row.get("symbol") or "").strip()
+        shares = int(_float(row.get("shares")))
+        price = _float(row.get("price"))
+        cash_after = _float(row.get("cash_after"))
+        if cash_after > 0:
+            cash = cash_after
+        if action == "BUY" and symbol and shares > 0 and price > 0:
+            position = {
+                "symbol": symbol,
+                "shares": shares,
+                "entry_price": price,
+                "highest_price": price,
+                "entry_time": str(row.get("timestamp") or ""),
+            }
+        elif action.startswith("SELL") and position and symbol == position.get("symbol"):
+            position = None
+    return position, cash
+
+
 def _write_live_equity(rows: list[dict[str, Any]], report_dir: Path) -> None:
     if not rows:
         return
@@ -1452,6 +1505,20 @@ def _strategy_snapshot(strategy: StockScannerConfig) -> dict[str, Any]:
         "force_exit_time",
     )
     return {key: getattr(strategy, key) for key in keys}
+
+
+def _position_entry_date(position: dict[str, Any] | None) -> object | None:
+    if not position:
+        return None
+    value = str(position.get("entry_time") or "").strip()
+    if not value:
+        return None
+    for candidate in (value, value.replace("T", " ")):
+        try:
+            return datetime.fromisoformat(candidate).date()
+        except ValueError:
+            pass
+    return None
 
 
 def _json_safe(value: Any) -> Any:
