@@ -33,6 +33,8 @@ NASDAQ_ORDER_EXCHANGE_CODE = "NASD"
 OVERSEAS_MIN_PRICE = 5.0
 OVERSEAS_MIN_TRADE_VALUE = 20_000_000.0
 OVERSEAS_PREMARKET_MIN_TRADE_VALUE = 2_000_000.0
+DEFAULT_POLL_INTERVAL_SEC = 15
+DEFAULT_MAX_SYMBOLS = 12
 NEW_YORK_TZ = ZoneInfo("America/New_York")
 OVERSEAS_FALLBACK_SYMBOLS = [
     "AAPL",
@@ -73,9 +75,9 @@ class LiveConfig:
     seed_source: str = "manual"
     auto_start: bool = False
     auto_select: bool = True
-    poll_interval_sec: int = 10
+    poll_interval_sec: int = DEFAULT_POLL_INTERVAL_SEC
     bar_minutes: int = 5
-    max_symbols: int = 20
+    max_symbols: int = DEFAULT_MAX_SYMBOLS
     max_positions: int = 3
     selection_refresh_sec: int = 300
     min_selection_hold_sec: int = 1800
@@ -97,14 +99,14 @@ class LiveConfig:
             symbol="",
             exchange_code=NASDAQ_ORDER_EXCHANGE_CODE,
             price_exchange_code=NASDAQ_PRICE_EXCHANGE_CODE,
-            currency=str(data.get("currency", "USD")).strip().upper() or "USD",
+            currency="USD" if market == OVERSEAS_MARKET else str(data.get("currency", "USD")).strip().upper() or "USD",
             seed_capital=_positive_float(data.get("seed_capital"), default_seed_capital),
             seed_source=_seed_source(data.get("seed_source", "manual")),
             auto_start=_truthy(data.get("auto_start")),
             auto_select=True,
-            poll_interval_sec=int(data.get("poll_interval_sec", 10)),
+            poll_interval_sec=max(DEFAULT_POLL_INTERVAL_SEC, int(data.get("poll_interval_sec", DEFAULT_POLL_INTERVAL_SEC))),
             bar_minutes=int(data.get("bar_minutes", 5)),
-            max_symbols=int(data.get("max_symbols", 20)),
+            max_symbols=max(1, min(DEFAULT_MAX_SYMBOLS, int(data.get("max_symbols", DEFAULT_MAX_SYMBOLS)))),
             max_positions=max(1, int(data.get("max_positions", 3))),
             selection_refresh_sec=max(300, int(data.get("selection_refresh_sec", 300))),
             min_selection_hold_sec=max(1800, int(data.get("min_selection_hold_sec", 1800))),
@@ -311,7 +313,7 @@ class LiveTrader:
                 price_errors.append({"symbol": symbol, "error": str(exc)})
                 continue
             if parsed["price"] <= 0:
-                price_errors.append({"symbol": symbol, "error": "price<=0"})
+                price_errors.append(_price_error_payload(symbol, "price<=0", parsed))
                 continue
             self._add_tick(symbol, strategy_now, parsed)
             updated_symbols.add(symbol)
@@ -410,6 +412,10 @@ class LiveTrader:
                 if len(rejected) < 12:
                     rejected.append({"symbol": symbol, "reason": f"price_error {exc}", "price": 0})
                 continue
+            if parsed["price"] <= 0:
+                if len(rejected) < 12:
+                    rejected.append(_price_error_payload(symbol, "price<=0", parsed, reason_key="reason", price=0))
+                continue
             passed, reject_reason = self._live_candidate_filter(parsed, row)
             if not passed:
                 if len(rejected) < 12:
@@ -444,12 +450,16 @@ class LiveTrader:
         )
         return selected
 
-    def _fetch_price(self, client: KisClient, symbol: str) -> dict[str, float]:
+    def _fetch_price(self, client: KisClient, symbol: str) -> dict[str, Any]:
         if self.market == OVERSEAS_MARKET:
             price_data = client.inquire_overseas_price(self.config.price_exchange_code, symbol)
-            return parse_overseas_price_response(price_data)
+            parsed = parse_overseas_price_response(price_data)
+            parsed["kis_response"] = _kis_response_summary(price_data)
+            return parsed
         price_data = client.inquire_price(symbol)
-        return parse_price_response(price_data)
+        parsed = parse_price_response(price_data)
+        parsed["kis_response"] = _kis_response_summary(price_data)
+        return parsed
 
     def _strategy_now(self, now: datetime) -> datetime:
         if self.market == OVERSEAS_MARKET:
@@ -1445,6 +1455,54 @@ def _append_decision_log(report_dir: Path, payload: dict[str, Any]) -> None:
     safe_payload = _json_safe(payload)
     with (report_dir / "decision_log.jsonl").open("a", encoding="utf-8") as log_file:
         log_file.write(json.dumps(safe_payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def _price_error_payload(
+    symbol: str,
+    message: str,
+    parsed: dict[str, Any],
+    *,
+    reason_key: str = "error",
+    price: float | int | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"symbol": symbol, reason_key: message}
+    if price is not None:
+        payload["price"] = price
+    meta = parsed.get("kis_response")
+    if isinstance(meta, dict):
+        payload["kis_response"] = meta
+    return payload
+
+
+def _kis_response_summary(data: dict[str, Any]) -> dict[str, Any]:
+    output = data.get("output")
+    summary: dict[str, Any] = {
+        "rt_cd": data.get("rt_cd", ""),
+        "msg_cd": data.get("msg_cd", ""),
+        "msg1": data.get("msg1", ""),
+        "output_keys": _output_keys(output),
+    }
+    return {key: value for key, value in summary.items() if _has_summary_value(value)}
+
+
+def _has_summary_value(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    if isinstance(value, list) and not value:
+        return False
+    return True
+
+
+def _output_keys(output: Any) -> list[str]:
+    if isinstance(output, dict):
+        return sorted(str(key) for key in output.keys())
+    if isinstance(output, list):
+        keys: set[str] = set()
+        for row in output[:5]:
+            if isinstance(row, dict):
+                keys.update(str(key) for key in row.keys())
+        return sorted(keys)
+    return []
 
 
 def _append_live_trade(trade, response: dict[str, Any], mode: str, trade_key: str, report_dir: Path) -> None:

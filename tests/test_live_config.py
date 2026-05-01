@@ -14,8 +14,9 @@ class LiveConfigTests(unittest.TestCase):
         config = LiveConfig.from_dict({})
 
         self.assertTrue(config.auto_select)
-        self.assertEqual(config.max_symbols, 20)
+        self.assertEqual(config.max_symbols, 12)
         self.assertEqual(config.max_positions, 3)
+        self.assertEqual(config.poll_interval_sec, 15)
         self.assertEqual(config.selection_refresh_sec, 300)
         self.assertEqual(config.min_selection_hold_sec, 1800)
         self.assertEqual(config.min_bars_before_evaluate, 20)
@@ -30,8 +31,17 @@ class LiveConfigTests(unittest.TestCase):
         self.assertEqual(config.to_dict()["max_positions"], 5)
 
     def test_old_fast_selection_refresh_is_migrated(self):
-        config = LiveConfig.from_dict({"selection_refresh_sec": 60, "min_selection_hold_sec": 600})
+        config = LiveConfig.from_dict(
+            {
+                "poll_interval_sec": 10,
+                "max_symbols": 20,
+                "selection_refresh_sec": 60,
+                "min_selection_hold_sec": 600,
+            }
+        )
 
+        self.assertEqual(config.poll_interval_sec, 15)
+        self.assertEqual(config.max_symbols, 12)
         self.assertEqual(config.selection_refresh_sec, 300)
         self.assertEqual(config.min_selection_hold_sec, 1800)
 
@@ -74,7 +84,15 @@ class LiveConfigTests(unittest.TestCase):
         self.assertFalse(hasattr(config, "watchlist"))
 
     def test_overseas_config_uses_nasdaq_scanner_defaults(self):
-        config = LiveConfig.from_dict({"market": "overseas", "symbol": "aapl"})
+        config = LiveConfig.from_dict(
+            {
+                "market": "overseas",
+                "symbol": "aapl",
+                "exchange_code": "NAS",
+                "price_exchange_code": "NASD",
+                "currency": "EUR",
+            }
+        )
 
         self.assertEqual(config.market, OVERSEAS_MARKET)
         self.assertEqual(config.symbol, "")
@@ -792,6 +810,40 @@ class LiveConfigTests(unittest.TestCase):
             self.assertFalse(entered)
             logs = _read_decision_logs(Path(tmpdir))
             self.assertTrue(any(row["event"] == "entry_rejected" for row in logs))
+
+    def test_price_zero_logs_kis_response_summary(self):
+        class ZeroPriceClient:
+            def inquire_price(self, symbol):
+                return {
+                    "rt_cd": "0",
+                    "msg_cd": "MCA00000",
+                    "msg1": "정상처리 되었습니다.",
+                    "output": {
+                        "stck_prpr": "0",
+                        "stck_oprc": "0",
+                        "acml_vol": "0",
+                    },
+                }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trader = LiveTrader(
+                LiveConfig(auto_select=False),
+                StockScannerConfig(),
+                report_dir=Path(tmpdir),
+            )
+            trader.active_symbols = ["005930"]
+
+            trader._run_cycle(ZeroPriceClient(), datetime(2026, 4, 30, 10, 0))
+
+            logs = _read_decision_logs(Path(tmpdir))
+            cycle = next(row for row in logs if row["event"] == "cycle")
+            error = cycle["price_errors"][0]
+            self.assertEqual(error["symbol"], "005930")
+            self.assertEqual(error["error"], "price<=0")
+            self.assertEqual(error["kis_response"]["rt_cd"], "0")
+            self.assertEqual(error["kis_response"]["msg_cd"], "MCA00000")
+            self.assertIn("stck_prpr", error["kis_response"]["output_keys"])
+            self.assertEqual(trader.snapshot()["price_error_count"], 1)
 
 
 class FakeOverseasRankClient:

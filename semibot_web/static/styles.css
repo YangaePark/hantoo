@@ -206,16 +206,6 @@ button.danger {
   margin: 0;
 }
 
-.overseas-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-.overseas-grid input:last-child {
-  grid-column: 1 / -1;
-}
-
 .balance-box {
   display: grid;
   gap: 8px;

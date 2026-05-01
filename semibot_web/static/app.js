@@ -253,9 +253,6 @@ async function loadLiveConfig() {
   $("liveMode").value = config.mode || "paper";
   $("accountNo").value = config.account_no || "";
   $("productCode").value = config.product_code || "01";
-  $("exchangeCode").value = config.exchange_code || "NASD";
-  $("priceExchangeCode").value = config.price_exchange_code || "NAS";
-  $("currency").value = config.currency || markets[state.activeMarket].currency;
   $("overseasPremarketEnabled").checked = Boolean(config.overseas_premarket_enabled);
   $("seedCapital").value = Math.round(Number(config.seed_capital || 1000000));
   $("maxPositions").value = Number(config.max_positions || 3);
@@ -276,9 +273,9 @@ function liveConfigPayload() {
     mode: $("liveMode").value,
     account_no: $("accountNo").value.trim(),
     product_code: $("productCode").value.trim() || "01",
-    exchange_code: $("exchangeCode").value.trim().toUpperCase() || "NASD",
-    price_exchange_code: $("priceExchangeCode").value.trim().toUpperCase() || "NAS",
-    currency: $("currency").value.trim().toUpperCase() || markets[state.activeMarket].currency,
+    exchange_code: "NASD",
+    price_exchange_code: "NAS",
+    currency: markets[state.activeMarket].currency,
     overseas_premarket_enabled: $("overseasPremarketEnabled").checked,
     seed_capital: seed,
     max_positions: maxPositions,
@@ -551,7 +548,7 @@ function marketLabel() {
 }
 
 function marketCurrency(market = state.activeMarket) {
-  if (market === "overseas") return ($("currency")?.value || markets.overseas.currency).trim().toUpperCase();
+  if (market === "overseas") return markets.overseas.currency;
   return "KRW";
 }
 
