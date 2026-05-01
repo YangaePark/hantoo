@@ -487,6 +487,32 @@ class LiveConfigTests(unittest.TestCase):
             logs = _read_decision_logs(Path(tmpdir))
             self.assertTrue(any(row["event"] == "order_submitted" and row["side"] == "sell" for row in logs))
 
+    def test_domestic_run_cycle_force_exits_position_after_selection_drops_it(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = StockScannerConfig(initial_capital=1_000_000, force_exit_time="15:15")
+            trader = LiveTrader(
+                LiveConfig(mode="live", account_no="12345678", auto_select=False),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            now = datetime(2026, 4, 30, 15, 16)
+            trader.active_symbols = ["000660"]
+            trader.position = {
+                "symbol": "005930",
+                "shares": 10,
+                "entry_price": 100.0,
+                "highest_price": 101.0,
+                "entry_time": "2026-04-30 10:00:00",
+            }
+            client = FakeDomesticQuoteOrderClient()
+
+            trader._run_cycle(client, now)
+
+            self.assertEqual(client.orders[0]["side"], "sell")
+            self.assertEqual(client.orders[0]["symbol"], "005930")
+            self.assertIsNone(trader.position)
+            self.assertIn("live_force_exit", trader.snapshot()["trade_message"])
+
     def test_position_symbol_is_polled_even_after_selection_drops_it(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             trader = LiveTrader(
@@ -673,6 +699,26 @@ class FakeDomesticOrderClient:
     def order_cash(self, **kwargs):
         self.orders.append(kwargs)
         return {"rt_cd": "0", "msg1": "정상"}
+
+
+class FakeDomesticQuoteOrderClient(FakeDomesticOrderClient):
+    def inquire_price(self, symbol):
+        prices = {
+            "005930": "101.00",
+            "000660": "95.00",
+        }
+        price = prices.get(symbol, "100.00")
+        return {
+            "output": {
+                "stck_prpr": price,
+                "stck_oprc": price,
+                "stck_hgpr": price,
+                "stck_lwpr": price,
+                "acml_vol": "1000",
+                "acml_tr_pbmn": "100000000",
+                "prdy_ctrt": "1.0",
+            }
+        }
 
 
 class FakeStartupTokenClient:
