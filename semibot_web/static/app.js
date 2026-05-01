@@ -2,8 +2,12 @@ const state = {
   reports: [],
   current: null,
   liveTimer: null,
+  balanceTimer: null,
+  balanceLoading: false,
   activeMarket: "domestic",
 };
+
+const BALANCE_REFRESH_MS = 60_000;
 
 const $ = (id) => document.getElementById(id);
 const markets = {
@@ -240,6 +244,7 @@ async function saveKeys() {
   $("appSecret").value = "";
   $("accessToken").value = "";
   $("keyStatus").textContent = `${marketLabel()} 저장됨: ${status.app_key_masked}${status.token_configured ? " / 토큰 있음" : " / 토큰 없음"}`;
+  refreshBalance({ silent: true }).catch((error) => console.error(error));
 }
 
 async function loadLiveConfig() {
@@ -297,6 +302,7 @@ async function saveLiveConfig(confirmAutoStart = true) {
     ? `${config.overseas_premarket_enabled ? "프리장 포함 " : ""}NASDAQ 자동선별`
     : "시장 자동선별";
   $("liveStatus").textContent = `${marketLabel()} 설정 저장됨: ${config.mode}, 시드 ${seedText}, 동시보유 최대 ${config.max_positions || 3}종목, 자동시작 ${config.auto_start ? "켜짐" : "꺼짐"}, ${target}`;
+  refreshBalance({ silent: true }).catch((error) => console.error(error));
   return config;
 }
 
@@ -461,6 +467,7 @@ async function startLive() {
     await loadLiveStatus();
   }
   await Promise.all([loadReports(), loadDecisionHistory()]);
+  refreshBalance({ silent: true }).catch((error) => console.error(error));
 }
 
 async function stopLive() {
@@ -472,10 +479,28 @@ async function stopLive() {
   await Promise.all([loadLiveStatus(), loadDecisionHistory()]);
 }
 
-async function refreshBalance() {
-  $("balanceStatus").textContent = "조회 중...";
-  const data = await getJSON(apiPath("/api/kis/balance"), { cache: "no-store" });
-  renderBalance(data);
+async function refreshBalance(options = {}) {
+  if (state.balanceLoading) return null;
+  state.balanceLoading = true;
+  const previousText = $("balanceStatus").textContent;
+  if (!options.silent) {
+    $("balanceStatus").textContent = "조회 중...";
+  }
+  try {
+    const data = await getJSON(apiPath("/api/kis/balance"), { cache: "no-store" });
+    renderBalance(data);
+    return data;
+  } catch (error) {
+    if (!options.silent) {
+      $("balanceStatus").textContent = `잔고 조회 실패: ${error.message}`;
+      clearBalanceValues();
+    } else if (!previousText || previousText === "계좌 설정 저장 후 조회" || previousText === "조회 중...") {
+      $("balanceStatus").textContent = `자동 새로고침 실패: ${error.message}`;
+    }
+    throw error;
+  } finally {
+    state.balanceLoading = false;
+  }
 }
 
 function renderBalance(data) {
@@ -551,6 +576,7 @@ async function switchMarket(market) {
   });
   renderMarketFields();
   await Promise.all([loadKeyStatus(), loadLiveConfig(), loadLiveStatus(), loadReports(), loadDecisionHistory()]);
+  refreshBalance({ silent: true }).catch((error) => console.error(error));
 }
 
 window.addEventListener("resize", () => {
@@ -578,8 +604,6 @@ $("stopLiveButton").addEventListener("click", () => {
 });
 $("refreshBalanceButton").addEventListener("click", () => {
   refreshBalance().catch((error) => {
-    $("balanceStatus").textContent = `잔고 조회 실패: ${error.message}`;
-    clearBalanceValues();
     alert(error.message);
   });
 });
@@ -587,19 +611,23 @@ $("seedBalanceMax").addEventListener("change", () => {
   updateSeedInputState();
   if ($("seedBalanceMax").checked) {
     refreshBalance().catch((error) => {
-      $("balanceStatus").textContent = `잔고 조회 실패: ${error.message}`;
-      clearBalanceValues();
       console.error(error);
     });
   }
 });
 
 renderMarketFields();
-Promise.all([loadReports(), loadKeyStatus(), loadLiveConfig(), loadLiveStatus(), loadDecisionHistory()]).catch((error) => {
-  console.error(error);
-  alert(error.message);
-});
+Promise.all([loadReports(), loadKeyStatus(), loadLiveConfig(), loadLiveStatus(), loadDecisionHistory()])
+  .then(() => refreshBalance({ silent: true }).catch((error) => console.error(error)))
+  .catch((error) => {
+    console.error(error);
+    alert(error.message);
+  });
 
 state.liveTimer = window.setInterval(() => {
   Promise.all([loadLiveStatus(), loadDecisionHistory()]).catch((error) => console.error(error));
 }, 5000);
+
+state.balanceTimer = window.setInterval(() => {
+  refreshBalance({ silent: true }).catch((error) => console.error(error));
+}, BALANCE_REFRESH_MS);
