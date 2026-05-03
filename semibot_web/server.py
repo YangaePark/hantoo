@@ -22,6 +22,7 @@ from semibot_live.kis import (
     parse_overseas_psamount_response,
 )
 from semibot_live.trader import (
+    DOMESTIC_ETF_MARKET,
     DEFAULT_MARKET,
     OVERSEAS_MARKET,
     SUPPORTED_MARKETS,
@@ -43,6 +44,7 @@ WEB_ROOT = ROOT / "semibot_web" / "static"
 REPORTS_ROOT = STATE_ROOT / "reports"
 SCANNER_CONFIG_PATH = ROOT / "config" / "volatile_stock_scalp.json"
 OVERSEAS_SCANNER_CONFIG_PATH = ROOT / "config" / "overseas_stock_scalp.json"
+DOMESTIC_ETF_SCANNER_CONFIG_PATH = ROOT / "config" / "domestic_etf_scalp.json"
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -438,7 +440,13 @@ def _market(value: object) -> str:
 
 def load_live_strategy_config(market: str = DEFAULT_MARKET, seed_capital: float | None = None) -> StockScannerConfig:
     config = StockScannerConfig()
-    path = OVERSEAS_SCANNER_CONFIG_PATH if _market(market) == OVERSEAS_MARKET else SCANNER_CONFIG_PATH
+    market = _market(market)
+    if market == OVERSEAS_MARKET:
+        path = OVERSEAS_SCANNER_CONFIG_PATH
+    elif market == DOMESTIC_ETF_MARKET:
+        path = DOMESTIC_ETF_SCANNER_CONFIG_PATH
+    else:
+        path = SCANNER_CONFIG_PATH
     if path.exists():
         config = StockScannerConfig.from_dict(_read_json_file(path))
     if seed_capital and seed_capital > 0:
@@ -459,7 +467,7 @@ def auto_start_live_trader(market: str = DEFAULT_MARKET) -> dict:
 
 
 def auto_start_live_traders() -> dict[str, dict]:
-    return {market: auto_start_live_trader(market) for market in (DEFAULT_MARKET, OVERSEAS_MARKET)}
+    return {market: auto_start_live_trader(market) for market in (DEFAULT_MARKET, OVERSEAS_MARKET, DOMESTIC_ETF_MARKET)}
 
 
 def _read_json_file(path: Path) -> dict:
@@ -513,11 +521,12 @@ def _report_label(name: str, metrics: dict) -> str:
 def run(host: str = "127.0.0.1", port: int = 8000) -> None:
     ensure_live_report(live_report_dir(DEFAULT_MARKET), strategy_name="live_volatile_stock_scanner")
     ensure_live_report(live_report_dir(OVERSEAS_MARKET), strategy_name="live_overseas_stock_scanner")
+    ensure_live_report(live_report_dir(DOMESTIC_ETF_MARKET), strategy_name="live_domestic_etf_scalp")
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     print(f"Dashboard running at http://{host}:{port}")
     auto_start_statuses = auto_start_live_traders()
     for market, auto_start_status in auto_start_statuses.items():
-        label = "해외" if market == OVERSEAS_MARKET else "국내"
+        label = "해외" if market == OVERSEAS_MARKET else "국내ETF" if market == DOMESTIC_ETF_MARKET else "국내"
         if auto_start_status.get("running"):
             print(f"[live:{market}] {label} 자동매매 자동시작")
         elif load_live_config(market).auto_start:

@@ -568,6 +568,22 @@ def parse_balance_response(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def parse_order_response(data: dict[str, Any]) -> dict[str, Any]:
+    """KIS 주문 응답에서 주문번호/접수일시를 추출."""
+    output = data.get("output")
+    if isinstance(output, list):
+        output = output[0] if output else {}
+    if not isinstance(output, dict):
+        output = {}
+    return {
+        "rt_cd": str(data.get("rt_cd", "")),
+        "msg": str(data.get("msg1") or data.get("msg_cd") or ""),
+        "order_no": str(output.get("ODNO") or output.get("odno") or ""),
+        "fwdg_org_no": str(output.get("KRX_FWDG_ORD_ORGNO") or output.get("krx_fwdg_ord_orgno") or ""),
+        "ord_time": str(output.get("ORD_TMD") or output.get("ord_tmd") or ""),
+    }
+
+
 def parse_overseas_balance_response(data: dict[str, Any]) -> dict[str, Any]:
     rows = _output_rows(data, ("output1", "output2", "output3", "output"))
     holding_rows = [row for row in rows if _looks_like_overseas_holding(row)]

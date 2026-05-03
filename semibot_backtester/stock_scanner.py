@@ -14,6 +14,8 @@ from .indicators import average_true_range, rolling_mean
 @dataclass(frozen=True)
 class StockScannerConfig:
     initial_capital: float = 1_000_000.0
+    entry_start_time: str = ""
+    entry_cutoff_time: str = ""
     observation_minutes: int = 20
     top_value_rank: int = 5
     gap_min_pct: float = 0.02
@@ -31,8 +33,14 @@ class StockScannerConfig:
     max_position_pct: float = 1.0
     stop_loss_pct: float = 0.01
     take_profit_pct: float = 0.025
+    partial_take_profit_pct: float = 0.0
+    partial_sell_ratio: float = 0.5
     trailing_stop_pct: float = 0.012
+    daily_take_profit_pct: float = 0.0
     daily_stop_loss_pct: float = 0.035
+    loss_cooldown_trades: int = 0
+    loss_cooldown_minutes: int = 30
+    max_consecutive_losses: int = 0
     max_trades_per_day: int = 6
     cooldown_bars: int = 2
     min_hold_bars: int = 1
@@ -74,6 +82,14 @@ class StockScannerConfig:
     @property
     def force_exit_clock(self) -> time:
         return datetime.strptime(self.force_exit_time, "%H:%M").time()
+
+    @property
+    def entry_start_clock(self) -> time:
+        return _parse_clock(self.entry_start_time, time.min)
+
+    @property
+    def entry_cutoff_clock(self) -> time:
+        return _parse_clock(self.entry_cutoff_time, self.force_exit_clock)
 
 
 @dataclass(frozen=True)
@@ -172,6 +188,7 @@ class StockScannerBacktester:
         avg_cost = 0.0
         entry_index: Optional[int] = None
         highest_close = 0.0
+        partial_stages = 0
         current_session: Optional[date] = None
         day_start_equity = self.config.initial_capital
         day_trades = 0
@@ -197,6 +214,7 @@ class StockScannerBacktester:
                     shares = 0
                     entry_index = None
                     highest_close = 0.0
+                    partial_stages = 0
                 current_session = session
                 day_start_equity = cash
                 day_trades = 0
@@ -224,7 +242,22 @@ class StockScannerBacktester:
                     elif signal_idx is not None:
                         signal_bar = symbol_bars[signal_idx]
                         highest_close = max(highest_close, signal_bar.close)
-                        exit_reason = self._exit_reason(signal_bar, avg_cost, highest_close, holding_bars)
+                        # 우선 부분익절 체크 (다단 2회까지)
+                        if (
+                            self.config.partial_take_profit_pct > 0
+                            and partial_stages < 2
+                            and shares > 1
+                            and holding_bars >= self.config.min_hold_bars
+                            and signal_bar.high >= avg_cost * (1.0 + self.config.partial_take_profit_pct * (partial_stages + 1))
+                        ):
+                            partial_shares = max(1, min(shares - 1, math.floor(shares * self.config.partial_sell_ratio)))
+                            cash, avg_cost = self._sell(current_bar, "SELL_PARTIAL", partial_shares, cash, avg_cost, trades, "partial_take_profit")
+                            shares -= partial_shares
+                            partial_stages += 1
+                            traded = True
+                            exit_reason = None
+                        else:
+                            exit_reason = self._exit_reason(signal_bar, avg_cost, highest_close, holding_bars)
                     else:
                         exit_reason = None
                     if exit_reason:
@@ -234,6 +267,7 @@ class StockScannerBacktester:
                         shares = 0
                         entry_index = None
                         highest_close = 0.0
+                        partial_stages = 0
                         traded = True
 
             can_enter = (
@@ -241,6 +275,7 @@ class StockScannerBacktester:
                 and not traded
                 and not day_paused
                 and day_trades < self.config.max_trades_per_day
+                and self.config.entry_start_clock <= timestamp.time() < self.config.entry_cutoff_clock
             )
             if can_enter:
                 candidate = self._best_candidate(
@@ -259,6 +294,7 @@ class StockScannerBacktester:
                         shares = bought
                         entry_index = time_idx
                         highest_close = current_bar.open
+                        partial_stages = 0
                         day_trades += 1
 
             mark_price = latest_close.get(position_symbol, 0.0) if position_symbol else 0.0
@@ -497,6 +533,16 @@ def _parse_datetime(value: str) -> datetime:
         except ValueError:
             pass
     return datetime.fromisoformat(value)
+
+
+def _parse_clock(value: str, fallback: time) -> time:
+    value = str(value or "").strip()
+    if not value:
+        return fallback
+    try:
+        return datetime.strptime(value, "%H:%M").time()
+    except ValueError:
+        return fallback
 
 
 def _optional_float(value: Optional[str]) -> Optional[float]:

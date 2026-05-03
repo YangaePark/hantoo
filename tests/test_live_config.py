@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from semibot_backtester.stock_scanner import StockBar, StockScannerConfig
-from semibot_live.trader import DEFAULT_MARKET, OVERSEAS_MARKET, LiveConfig, LiveTrader, live_report_dir
+from semibot_live.trader import DOMESTIC_ETF_MARKET, DEFAULT_MARKET, OVERSEAS_MARKET, LiveConfig, LiveTrader, live_report_dir
 
 
 class LiveConfigTests(unittest.TestCase):
@@ -112,6 +112,13 @@ class LiveConfigTests(unittest.TestCase):
 
     def test_overseas_report_path_is_separate(self):
         self.assertNotEqual(live_report_dir(DEFAULT_MARKET), live_report_dir(OVERSEAS_MARKET))
+
+    def test_domestic_etf_config_uses_separate_market_slot(self):
+        config = LiveConfig.from_dict({"market": "domestic_etf", "currency": "USD"})
+
+        self.assertEqual(config.market, DOMESTIC_ETF_MARKET)
+        self.assertEqual(config.currency, "KRW")
+        self.assertNotEqual(live_report_dir(DEFAULT_MARKET), live_report_dir(DOMESTIC_ETF_MARKET))
 
     def test_entry_wait_message_explains_force_exit_time(self):
         strategy = StockScannerConfig()
@@ -309,6 +316,54 @@ class LiveConfigTests(unittest.TestCase):
 
         self.assertIn("AAPL", candidates)
         self.assertIn("fallback", candidates["AAPL"]["_sources"])
+
+    def test_domestic_etf_candidates_include_one_x_etfs_only(self):
+        config = LiveConfig.from_dict({"market": "domestic_etf"})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trader = LiveTrader(config, StockScannerConfig(), report_dir=Path(tmpdir))
+
+            candidates = trader._domestic_etf_candidate_symbols(FakeDomesticEtfRankClient())
+
+            self.assertIn("069500", candidates)
+            self.assertIn("102110", candidates)
+            self.assertNotIn("005930", candidates)
+            self.assertNotIn("122630", candidates)
+            self.assertIn("etf_universe", candidates["069500"]["_sources"])
+
+    def test_domestic_etf_direct_entry_uses_vwap_profile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = LiveConfig.from_dict({"market": "domestic_etf", "mode": "live", "account_no": "12345678"})
+            strategy = StockScannerConfig(
+                initial_capital=1_000_000,
+                entry_start_time="09:05",
+                entry_cutoff_time="14:30",
+                observation_minutes=5,
+                gap_min_pct=0.0,
+                gap_max_pct=0.05,
+                volume_sma=2,
+                volume_factor=1.0,
+                min_atr_pct=0.0,
+                max_atr_pct=0.03,
+                max_extension_pct=0.006,
+                stop_loss_pct=0.002,
+            )
+            trader = LiveTrader(config, strategy, report_dir=Path(tmpdir))
+            start = datetime(2026, 4, 30, 9, 0)
+            trader.active_symbols = ["069500"]
+            trader.cash = 1_000_000
+            trader.bars = [
+                StockBar("069500", start - timedelta(days=1), 30000.0, 30000.0, 30000.0, 30000.0, 1),
+                StockBar("069500", start, 30000.0, 30020.0, 29980.0, 30010.0, 1000),
+                StockBar("069500", start + timedelta(minutes=5), 30010.0, 30070.0, 30000.0, 30060.0, 1100),
+                StockBar("069500", start + timedelta(minutes=10), 30060.0, 30110.0, 30050.0, 30100.0, 1300),
+            ]
+            client = FakeDomesticOrderClient()
+
+            entered = trader._try_live_direct_entry(client, start + timedelta(minutes=11), trader._active_strategy(start + timedelta(minutes=11)), {}, [])
+
+            self.assertTrue(entered)
+            self.assertEqual(client.orders[0]["symbol"], "069500")
+            self.assertIn("live_domestic_etf_vwap_entry", trader.snapshot()["trade_message"])
 
     def test_regular_session_resets_premarket_bars_when_flat(self):
         config = LiveConfig.from_dict({"market": "overseas", "overseas_premarket_enabled": True})
@@ -913,6 +968,24 @@ class EmptyOverseasRankClient:
 
     def overseas_volume_power_rank(self, **kwargs):
         return {"output2": []}
+
+
+class FakeDomesticEtfRankClient:
+    def volume_rank(self, **kwargs):
+        return {
+            "output": [
+                {"stck_shrn_iscd": "069500", "hts_kor_isnm": "KODEX 200", "acml_tr_pbmn": "30000000000"},
+                {"stck_shrn_iscd": "102110", "hts_kor_isnm": "TIGER 200", "acml_tr_pbmn": "15000000000"},
+                {"stck_shrn_iscd": "122630", "hts_kor_isnm": "KODEX 레버리지", "acml_tr_pbmn": "50000000000"},
+                {"stck_shrn_iscd": "005930", "hts_kor_isnm": "삼성전자", "acml_tr_pbmn": "100000000000"},
+            ]
+        }
+
+    def fluctuation_rank(self, **kwargs):
+        return {"output": []}
+
+    def volume_power_rank(self):
+        return {"output": []}
 
 
 class FakeDomesticOrderClient:

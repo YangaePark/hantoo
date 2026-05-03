@@ -14,22 +14,46 @@ from zoneinfo import ZoneInfo
 
 from semibot_backtester.stock_scanner import ScannerTrade, StockBar, StockScannerConfig, StockScannerBacktester
 
-from .kis import KisClient, KisCredentials, parse_overseas_price_response, parse_price_response, parse_rank_rows, rank_row_symbol
+from .kis import KisClient, KisCredentials, parse_balance_response, parse_order_response, parse_overseas_balance_response, parse_overseas_price_response, parse_price_response, parse_rank_rows, rank_row_symbol
 
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE_ROOT = Path(os.environ.get("SEMIBOT_STATE_ROOT", ROOT)).resolve()
 DEFAULT_MARKET = "domestic"
 OVERSEAS_MARKET = "overseas"
-SUPPORTED_MARKETS = {DEFAULT_MARKET, OVERSEAS_MARKET}
+DOMESTIC_ETF_MARKET = "domestic_etf"
+SUPPORTED_MARKETS = {DEFAULT_MARKET, OVERSEAS_MARKET, DOMESTIC_ETF_MARKET}
 LIVE_CONFIG_PATH = STATE_ROOT / "config" / "live.local.json"
 KIS_KEYS_PATH = STATE_ROOT / "config" / "kis.local.json"
 LIVE_REPORT_DIR = STATE_ROOT / "reports" / "live_trading"
 OVERSEAS_LIVE_CONFIG_PATH = STATE_ROOT / "config" / "live.overseas.local.json"
 OVERSEAS_KIS_KEYS_PATH = STATE_ROOT / "config" / "kis.overseas.local.json"
 OVERSEAS_LIVE_REPORT_DIR = STATE_ROOT / "reports" / "live_trading_overseas"
+DOMESTIC_ETF_LIVE_CONFIG_PATH = STATE_ROOT / "config" / "live.domestic_etf.local.json"
+DOMESTIC_ETF_KIS_KEYS_PATH = STATE_ROOT / "config" / "kis.domestic_etf.local.json"
+DOMESTIC_ETF_LIVE_REPORT_DIR = STATE_ROOT / "reports" / "live_trading_domestic_etf"
 NASDAQ_PRICE_EXCHANGE_CODE = "NAS"
 NASDAQ_ORDER_EXCHANGE_CODE = "NASD"
+DOMESTIC_ETF_MIN_TRADE_VALUE = 1_000_000_000.0
+# 종목별 차등화된 거래대금 최소입계 (KRW). 코스피200/200은 높게, 세터 ETF는 낮게.
+DOMESTIC_ETF_TRADE_VALUE_BY_SYMBOL: dict[str, float] = {
+    "069500": 5_000_000_000.0,  # KODEX 200
+    "102110": 2_000_000_000.0,  # TIGER 200
+    "229200": 1_000_000_000.0,  # KODEX 코스닥150
+    "232080": 800_000_000.0,    # TIGER 코스닥150
+    "091160": 500_000_000.0,    # KODEX 반도체
+    "091230": 300_000_000.0,    # TIGER 반도체
+    "396500": 300_000_000.0,    # TIGER Fn반도체TOP10
+    "305720": 500_000_000.0,    # KODEX 2차전지
+    "305540": 500_000_000.0,    # TIGER 2차전지
+    "091170": 300_000_000.0,    # KODEX 은행
+    "091220": 200_000_000.0,    # TIGER 은행
+    "091180": 300_000_000.0,    # KODEX 자동차
+    "157510": 200_000_000.0,    # TIGER 자동차
+    "244580": 300_000_000.0,    # KODEX 바이오
+    "364970": 200_000_000.0,    # TIGER 바이오TOP10
+}
+DOMESTIC_ETF_DEFAULT_TRADE_VALUE = 200_000_000.0
 OVERSEAS_MIN_PRICE = 5.0
 OVERSEAS_MIN_TRADE_VALUE = 20_000_000.0
 OVERSEAS_PREMARKET_MIN_TRADE_VALUE = 2_000_000.0
@@ -56,6 +80,24 @@ OVERSEAS_FALLBACK_SYMBOLS = [
     "AMAT",
     "TXN",
 ]
+DOMESTIC_ETF_UNIVERSE = {
+    "069500": "KODEX 200",
+    "102110": "TIGER 200",
+    "229200": "KODEX 코스닥150",
+    "232080": "TIGER 코스닥150",
+    "091160": "KODEX 반도체",
+    "091230": "TIGER 반도체",
+    "396500": "TIGER Fn반도체TOP10",
+    "305720": "KODEX 2차전지산업",
+    "305540": "TIGER 2차전지테마",
+    "091170": "KODEX 은행",
+    "091220": "TIGER 은행",
+    "091180": "KODEX 자동차",
+    "157510": "TIGER 자동차",
+    "244580": "KODEX 바이오",
+    "364970": "TIGER 바이오TOP10",
+}
+DOMESTIC_ETF_INDEX_PROXIES = ("069500", "102110", "229200", "232080")
 SESSION_PREMARKET = "premarket"
 SESSION_REGULAR = "regular"
 SESSION_CLOSED = "closed"
@@ -91,6 +133,7 @@ class LiveConfig:
         market = _market(data.get("market", DEFAULT_MARKET))
         default_clock_offset = -7 if market == OVERSEAS_MARKET else 0
         default_seed_capital = 10_000.0 if market == OVERSEAS_MARKET else 1_000_000.0
+        currency = "USD" if market == OVERSEAS_MARKET else "KRW"
         return cls(
             market=market,
             mode=data.get("mode", "paper"),
@@ -99,7 +142,7 @@ class LiveConfig:
             symbol="",
             exchange_code=NASDAQ_ORDER_EXCHANGE_CODE,
             price_exchange_code=NASDAQ_PRICE_EXCHANGE_CODE,
-            currency="USD" if market == OVERSEAS_MARKET else str(data.get("currency", "USD")).strip().upper() or "USD",
+            currency=currency,
             seed_capital=_positive_float(data.get("seed_capital"), default_seed_capital),
             seed_source=_seed_source(data.get("seed_source", "manual")),
             auto_start=_truthy(data.get("auto_start")),
@@ -204,8 +247,9 @@ class LiveTrader:
             "trade_message": "매수 조건 대기",
         }
         self.bars: list[StockBar] = []
-        self.seeded_previous_close: set[str] = set()
+        self.seeded_previous_close: dict[str, object] = {}
         self.last_cumulative_volume: dict[tuple[str, object], int] = {}
+        self._error_streak: int = 0
         self.active_symbols: list[str] = []
         self.selected_since: dict[str, float] = {}
         self.last_selection_at = 0.0
@@ -214,6 +258,7 @@ class LiveTrader:
         self.positions: list[dict[str, Any]] = []
         self.cash = strategy.initial_capital
         self.day_start_cash = strategy.initial_capital
+        self.day_state_date: object | None = None
         ensure_live_report(self.report_dir, strategy_name=_strategy_name(self.market))
         restored_positions, restored_cash = _open_positions_from_trades(self.report_dir)
         if restored_positions:
@@ -266,8 +311,8 @@ class LiveTrader:
                     self._run_cycle(client, now)
                     time.sleep(max(1, self.config.poll_interval_sec))
                 except Exception as exc:  # noqa: BLE001
-                    self._record_retriable_error(exc, now)
-                    time.sleep(max(5, min(60, self.config.poll_interval_sec * 2)))
+                    backoff = self._record_retriable_error(exc, now)
+                    time.sleep(backoff)
         except Exception as exc:  # noqa: BLE001
             with self.lock:
                 self.status.update({"last_error": str(exc), "message": "오류"})
@@ -293,8 +338,9 @@ class LiveTrader:
 
     def _run_cycle(self, client: KisClient, now: datetime) -> None:
         strategy_now = self._strategy_now(now)
+        self._sync_daily_state(strategy_now)
         session = self._market_session(strategy_now)
-        if self.market == OVERSEAS_MARKET and session == SESSION_CLOSED:
+        if session == SESSION_CLOSED:
             self._set_market_wait_status(now, strategy_now)
             return
         self._reset_premarket_bars_for_regular_if_flat(strategy_now, session)
@@ -318,6 +364,7 @@ class LiveTrader:
             self._add_tick(symbol, strategy_now, parsed)
             updated_symbols.add(symbol)
         self._evaluate(client, strategy_now, updated_symbols)
+        self._error_streak = 0
         bar_status = self._bar_collection_status(strategy_now)
         self._log_decision(
             "cycle",
@@ -378,7 +425,26 @@ class LiveTrader:
             positions=[dict(position) for position in self.positions],
         )
 
-    def _record_retriable_error(self, exc: Exception, now: datetime) -> None:
+    def _record_retriable_error(self, exc: Exception, now: datetime) -> int:
+        msg = str(exc).lower()
+        if any(token in msg for token in ("token", "401", "403", "unauthor")):
+            kind = "token"
+        elif any(token in msg for token in ("rate", "limit", "429", "too many")):
+            kind = "rate_limit"
+        elif any(token in msg for token in ("timeout", "timed out")):
+            kind = "timeout"
+        else:
+            kind = "network"
+        self._error_streak = min(self._error_streak + 1, 8)
+        if kind == "token":
+            self.startup_token_checked = False
+            backoff = 5
+        elif kind == "rate_limit":
+            backoff = min(120, 10 * (2 ** (self._error_streak - 1)))
+        elif kind == "timeout":
+            backoff = min(60, max(10, self.config.poll_interval_sec * self._error_streak))
+        else:
+            backoff = max(5, min(60, self.config.poll_interval_sec * 2))
         with self.lock:
             self.status.update(
                 {
@@ -389,8 +455,9 @@ class LiveTrader:
                     "active_symbols": list(self.active_symbols),
                 }
             )
-        self._set_trade_message("통신 오류로 다음 주기에 재시도")
-        self._log_decision("error", now, error=str(exc), active_symbols=list(self.active_symbols))
+        self._set_trade_message(f"통신 오류({kind})로 {backoff}초 후 재시도")
+        self._log_decision("error", now, error=str(exc), kind=kind, backoff=backoff, streak=self._error_streak, active_symbols=list(self.active_symbols))
+        return backoff
 
     def _initial_symbols(self, client: KisClient) -> list[str]:
         if self.market == OVERSEAS_MARKET:
@@ -426,6 +493,8 @@ class LiveTrader:
             time.sleep(0.08 if self.market == OVERSEAS_MARKET else 0.04)
         ranked.sort(reverse=True)
         fresh_selected = [symbol for _, symbol in ranked[: self.config.max_symbols]]
+        if self.market == DOMESTIC_ETF_MARKET:
+            fresh_selected = _prepend_symbols(fresh_selected, [symbol for symbol in DOMESTIC_ETF_INDEX_PROXIES if symbol in candidates], self.config.max_symbols)
         if self.market == OVERSEAS_MARKET and len(fresh_selected) < self.config.max_symbols:
             for symbol in tracking_symbols:
                 if symbol not in fresh_selected:
@@ -434,7 +503,7 @@ class LiveTrader:
                     break
         selected = self._merge_selected_symbols(fresh_selected, now_ts)
         with self.lock:
-            market_label = "NASDAQ 자동선별" if self.market == OVERSEAS_MARKET else "자동선별"
+            market_label = _selector_label(self.market)
             if self.market == OVERSEAS_MARKET and self._market_session(self._strategy_now(datetime.now())) == SESSION_PREMARKET:
                 market_label = "프리장 NASDAQ 자동선별"
             hold_minutes = max(1, round(self.config.min_selection_hold_sec / 60))
@@ -470,7 +539,12 @@ class LiveTrader:
 
     def _market_session(self, now: datetime) -> str:
         if self.market != OVERSEAS_MARKET:
-            return SESSION_REGULAR
+            if now.weekday() >= 5:
+                return SESSION_CLOSED
+            current = now.time()
+            if clock_time(9, 0) <= current < clock_time(15, 30):
+                return SESSION_REGULAR
+            return SESSION_CLOSED
         current = now.time()
         if clock_time(9, 30) <= current < clock_time(16, 0):
             return SESSION_REGULAR
@@ -507,15 +581,9 @@ class LiveTrader:
     def _candidate_symbols(self, client: KisClient) -> dict[str, dict[str, Any]]:
         if self.market == OVERSEAS_MARKET:
             return self._overseas_candidate_symbols(client)
-        rows: list[tuple[str, dict[str, Any]]] = []
-        responses = [
-            ("trade_value", client.volume_rank(sort_code="3", min_volume="0")),
-            ("volume_surge", client.volume_rank(sort_code="1", min_volume="0")),
-            ("gap_up", client.fluctuation_rank(min_rate=str(int(self.strategy.gap_min_pct * 100)), max_rate="30", count="80")),
-            ("strength", client.volume_power_rank()),
-        ]
-        for source, response in responses:
-            rows.extend((source, row) for row in parse_rank_rows(response))
+        if self.market == DOMESTIC_ETF_MARKET:
+            return self._domestic_etf_candidate_symbols(client)
+        rows = self._domestic_rank_rows(client)
 
         candidates: dict[str, dict[str, Any]] = {}
         for source, row in rows:
@@ -530,6 +598,39 @@ class LiveTrader:
                 continue
             candidates[symbol].update({key: value for key, value in row.items() if value not in {"", None}})
             candidates[symbol].setdefault("_sources", []).append(source)
+        return candidates
+
+    def _domestic_rank_rows(self, client: KisClient) -> list[tuple[str, dict[str, Any]]]:
+        rows: list[tuple[str, dict[str, Any]]] = []
+        responses = [
+            ("trade_value", client.volume_rank(sort_code="3", min_volume="0")),
+            ("volume_surge", client.volume_rank(sort_code="1", min_volume="0")),
+            ("gap_up", client.fluctuation_rank(min_rate=str(int(self.strategy.gap_min_pct * 100)), max_rate="30", count="80")),
+            ("strength", client.volume_power_rank()),
+        ]
+        for source, response in responses:
+            rows.extend((source, row) for row in parse_rank_rows(response))
+        return rows
+
+    def _domestic_etf_candidate_symbols(self, client: KisClient) -> dict[str, dict[str, Any]]:
+        candidates: dict[str, dict[str, Any]] = {}
+        for source, row in self._domestic_rank_rows(client):
+            symbol = rank_row_symbol(row)
+            if not _valid_stock_symbol(symbol):
+                continue
+            if not _included_domestic_etf(row, symbol):
+                continue
+            if symbol not in candidates:
+                candidates[symbol] = dict(row)
+                candidates[symbol]["_sources"] = [source]
+                continue
+            candidates[symbol].update({key: value for key, value in row.items() if value not in {"", None}})
+            candidates[symbol].setdefault("_sources", []).append(source)
+        for symbol, name in DOMESTIC_ETF_UNIVERSE.items():
+            if _excluded_domestic_etf_name(name):
+                continue
+            candidates.setdefault(symbol, {"stck_shrn_iscd": symbol, "hts_kor_isnm": name, "_sources": []})
+            candidates[symbol].setdefault("_sources", []).append("etf_universe")
         return candidates
 
     def _overseas_candidate_symbols(self, client: KisClient) -> dict[str, dict[str, Any]]:
@@ -564,7 +665,7 @@ class LiveTrader:
                 candidates[symbol] = {
                     "symb": symbol,
                     "_sources": ["fallback"],
-                    "vol_inrt": "220",
+                    "vol_inrt": "110",
                 }
         return candidates
 
@@ -585,13 +686,18 @@ class LiveTrader:
         day_range = ((parsed["high"] - parsed["low"]) / price) if price else 0.0
         if day_range < strategy.min_atr_pct:
             return False, f"range {day_range * 100:.2f}%"
+        sources = set(row.get("_sources", []))
+        symbol_for_threshold = str(row.get("stck_shrn_iscd") or row.get("symb") or "").strip().upper()
+        trade_value = parsed["value"] or _row_trade_value(row)
+        threshold = self._trade_value_threshold(symbol_for_threshold)
+        if self.market == DOMESTIC_ETF_MARKET:
+            if trade_value >= threshold or "trade_value" in sources:
+                return True, ""
+            return False, f"value {trade_value:.0f}<{threshold:.0f}"
         avg_volume = _float(row.get("avrg_vol"))
         volume_surge = (parsed["volume"] / avg_volume) if avg_volume > 0 else _float(row.get("vol_inrt")) / 100.0
-        sources = set(row.get("_sources", []))
         if volume_surge < strategy.volume_factor and "volume_surge" not in sources:
             return False, f"volume {volume_surge:.2f}x"
-        trade_value = parsed["value"] or _row_trade_value(row)
-        threshold = self._trade_value_threshold()
         if trade_value >= threshold or "trade_value" in sources:
             return True, ""
         return False, f"value {trade_value:.0f}<{threshold:.0f}"
@@ -607,7 +713,11 @@ class LiveTrader:
         source_bonus = _source_priority(row) * (0.35 if self.market == OVERSEAS_MARKET else 0.0)
         return (math.log10(trade_value) * 1.5) + (gap * 100.0) + (day_range * 120.0) + min(volume_surge, 8.0) + strength + source_bonus
 
-    def _trade_value_threshold(self) -> float:
+    def _trade_value_threshold(self, symbol: str | None = None) -> float:
+        if self.market == DOMESTIC_ETF_MARKET:
+            if symbol and symbol in DOMESTIC_ETF_TRADE_VALUE_BY_SYMBOL:
+                return DOMESTIC_ETF_TRADE_VALUE_BY_SYMBOL[symbol]
+            return DOMESTIC_ETF_DEFAULT_TRADE_VALUE
         if self.market != OVERSEAS_MARKET:
             return 1_000_000_000
         if self._market_session(self._strategy_now(datetime.now())) == SESSION_PREMARKET:
@@ -619,38 +729,45 @@ class LiveTrader:
         price = parsed["price"]
         volume_delta = self._volume_delta(symbol, now.date(), int(parsed["volume"]))
         minute_bucket = now.replace(minute=(now.minute // self.config.bar_minutes) * self.config.bar_minutes, second=0, microsecond=0)
-        existing = next((bar for bar in reversed(self.bars) if bar.symbol == symbol and bar.timestamp == minute_bucket), None)
-        if existing:
-            self.bars.remove(existing)
-            bar = StockBar(
-                symbol=symbol,
-                timestamp=minute_bucket,
-                open=existing.open,
-                high=max(existing.high, price),
-                low=min(existing.low, price),
-                close=price,
-                volume=existing.volume + volume_delta,
-            )
-        else:
-            bar = StockBar(
-                symbol=symbol,
-                timestamp=minute_bucket,
-                open=price,
-                high=price,
-                low=price,
-                close=price,
-                volume=volume_delta,
-            )
-        self.bars.append(bar)
-        self.bars = self.bars[-5000:]
+        with self.lock:
+            existing = next((bar for bar in reversed(self.bars) if bar.symbol == symbol and bar.timestamp == minute_bucket), None)
+            if existing:
+                self.bars.remove(existing)
+                bar = StockBar(
+                    symbol=symbol,
+                    timestamp=minute_bucket,
+                    open=existing.open,
+                    high=max(existing.high, price),
+                    low=min(existing.low, price),
+                    close=price,
+                    volume=existing.volume + volume_delta,
+                )
+            else:
+                bar = StockBar(
+                    symbol=symbol,
+                    timestamp=minute_bucket,
+                    open=price,
+                    high=price,
+                    low=price,
+                    close=price,
+                    volume=volume_delta,
+                )
+            self.bars.append(bar)
+            self.bars = self.bars[-5000:]
 
     def _volume_delta(self, symbol: str, session: object, cumulative_volume: int) -> int:
+        # 세션 전환 시 이전 다른 날짜 키는 점진적으로 제거 (메모리 누수 방지)
+        for stale_key in [k for k in self.last_cumulative_volume if k[0] == symbol and k[1] != session]:
+            self.last_cumulative_volume.pop(stale_key, None)
         key = (symbol, session)
         previous = self.last_cumulative_volume.get(key)
-        self.last_cumulative_volume[key] = max(0, cumulative_volume)
-        if previous is None or cumulative_volume < previous:
+        cumulative_volume = max(0, cumulative_volume)
+        self.last_cumulative_volume[key] = cumulative_volume
+        if previous is None:
             return 0
-        return max(0, cumulative_volume - previous)
+        if cumulative_volume < previous:
+            return 0
+        return cumulative_volume - previous
 
     def _symbols_to_poll(self) -> list[str]:
         symbols = list(self.active_symbols)
@@ -658,6 +775,10 @@ class LiveTrader:
             position_symbol = str(position.get("symbol") or "")
             if position_symbol and position_symbol not in symbols:
                 symbols.insert(0, position_symbol)
+        if self.market == DOMESTIC_ETF_MARKET:
+            for proxy in DOMESTIC_ETF_INDEX_PROXIES:
+                if proxy not in symbols:
+                    symbols.append(proxy)
         return symbols
 
     def _bar_collection_status(self, now: datetime) -> dict[str, Any]:
@@ -682,26 +803,32 @@ class LiveTrader:
         }
 
     def _seed_previous_close(self, symbol: str, now: datetime, parsed: dict[str, float]) -> None:
-        if symbol in self.seeded_previous_close:
+        if self.seeded_previous_close.get(symbol) == now.date():
             return
         prev_rate = parsed.get("prev_rate_pct", 0.0)
         price = parsed.get("price", 0.0)
         if price <= 0 or prev_rate <= -99.0:
             return
         previous_close = price / (1.0 + (prev_rate / 100.0)) if prev_rate else price
-        previous_timestamp = datetime.combine(now.date() - timedelta(days=1), clock_time(15, 30))
-        self.bars.append(
-            StockBar(
-                symbol=symbol,
-                timestamp=previous_timestamp,
-                open=previous_close,
-                high=previous_close,
-                low=previous_close,
-                close=previous_close,
-                volume=1,
+        seed_close_time = clock_time(16, 0) if self.market == OVERSEAS_MARKET else clock_time(15, 30)
+        previous_timestamp = datetime.combine(now.date() - timedelta(days=1), seed_close_time)
+        with self.lock:
+            self.bars = [
+                bar for bar in self.bars
+                if not (bar.symbol == symbol and bar.session == previous_timestamp.date())
+            ]
+            self.bars.append(
+                StockBar(
+                    symbol=symbol,
+                    timestamp=previous_timestamp,
+                    open=previous_close,
+                    high=previous_close,
+                    low=previous_close,
+                    close=previous_close,
+                    volume=1,
+                )
             )
-        )
-        self.seeded_previous_close.add(symbol)
+        self.seeded_previous_close[symbol] = now.date()
 
     def _evaluate(self, client: KisClient, now: datetime, fresh_symbols: set[str] | None = None) -> None:
         strategy = self._active_strategy(now)
@@ -841,7 +968,12 @@ class LiveTrader:
         equity_curve: list[dict[str, Any]],
         fresh_symbols: set[str] | None = None,
     ) -> bool:
-        if self.config.mode != "live" or now.time() >= strategy.force_exit_clock:
+        if self.config.mode != "live":
+            return False
+        risk_block = self._entry_risk_block(now, strategy)
+        if risk_block:
+            self._set_trade_message(risk_block)
+            self._log_decision("entry_skip", now, reason="risk_control", detail=risk_block)
             return False
         entry_count = _live_buy_count_for_session(self.report_dir, now.date())
         if entry_count >= strategy.max_trades_per_day:
@@ -890,6 +1022,11 @@ class LiveTrader:
         return self._submit_live_buy(client, now, strategy, bar, shares, reason, metrics, equity_curve)
 
     def _can_open_position(self, symbol: str, now: datetime, strategy: StockScannerConfig) -> bool:
+        risk_block = self._entry_risk_block(now, strategy)
+        if risk_block:
+            self._set_trade_message(risk_block)
+            self._log_decision("entry_skip", now, symbol=symbol, reason="risk_control", detail=risk_block)
+            return False
         if symbol in self._held_symbols():
             self._set_trade_message(f"{symbol}: 이미 보유 중")
             self._log_decision("entry_skip", now, symbol=symbol, reason="already_held")
@@ -921,6 +1058,50 @@ class LiveTrader:
 
     def _held_symbols(self) -> set[str]:
         return {str(position.get("symbol") or "") for position in self.positions if position.get("symbol")}
+
+    def _entry_risk_block(self, now: datetime, strategy: StockScannerConfig) -> str:
+        self._sync_daily_state(now)
+        if now.time() < strategy.entry_start_clock:
+            return f"{strategy.entry_start_time} 전 신규 진입 대기"
+        if now.time() >= strategy.entry_cutoff_clock:
+            return f"{strategy.entry_cutoff_time or strategy.force_exit_time} 이후 신규 진입 중단"
+        daily_return = self._daily_return(now)
+        if strategy.daily_take_profit_pct > 0 and daily_return >= strategy.daily_take_profit_pct:
+            return f"일일 목표 도달 ({daily_return * 100:.2f}%)"
+        if strategy.daily_stop_loss_pct > 0 and daily_return <= -strategy.daily_stop_loss_pct:
+            return f"일일 손실한도 도달 ({daily_return * 100:.2f}%)"
+        losses, last_loss_at = _live_consecutive_losses(self.report_dir, now.date())
+        if strategy.max_consecutive_losses > 0 and losses >= strategy.max_consecutive_losses:
+            return f"연속 손절 한도 도달 ({losses}/{strategy.max_consecutive_losses}회)"
+        if strategy.loss_cooldown_trades > 0 and losses >= strategy.loss_cooldown_trades and last_loss_at:
+            cooldown_until = last_loss_at + timedelta(minutes=max(1, strategy.loss_cooldown_minutes))
+            if now < cooldown_until:
+                return f"{losses}연속 손절 후 쿨다운 ({cooldown_until.strftime('%H:%M')}까지)"
+        return ""
+
+    def _sync_daily_state(self, now: datetime) -> None:
+        if self.day_state_date == now.date():
+            return
+        self.day_state_date = now.date()
+        # 장중 재기동 대비: 오늘 이미 실현된 손익을 빼서 일중 시작점을 추정
+        current_equity = self._mark_to_market_equity(now.date())
+        realized_today = _live_realized_today(self.report_dir, now.date())
+        baseline = current_equity - realized_today
+        self.day_start_cash = max(1.0, baseline)
+
+    def _daily_return(self, now: datetime) -> float:
+        if self.day_start_cash <= 0:
+            return 0.0
+        return (self._mark_to_market_equity(now.date()) / self.day_start_cash) - 1.0
+
+    def _mark_to_market_equity(self, session: object) -> float:
+        equity = float(self.cash)
+        for position in self.positions:
+            symbol = str(position.get("symbol") or "")
+            latest = _latest_symbol_bar(self.bars, symbol, session)
+            mark_price = latest.close if latest else float(position.get("entry_price") or 0.0)
+            equity += int(position.get("shares") or 0) * mark_price
+        return equity
 
     def _position_for_symbol(self, symbol: str) -> dict[str, Any] | None:
         symbol = str(symbol)
@@ -962,19 +1143,29 @@ class LiveTrader:
         latest = _latest_symbol_bar(self.bars, symbol, now.date())
         if not latest:
             return False
-        highest_price = max(float(position.get("highest_price") or entry_price), latest.close)
+        highest_price = max(float(position.get("highest_price") or entry_price), latest.high)
         position["highest_price"] = highest_price
+        stages = int(position.get("partial_stages") or 0)
+        partial_threshold = strategy.partial_take_profit_pct * (stages + 1)
         reason = ""
         entry_date = _position_entry_date(position)
         if entry_date and latest.session > entry_date:
             reason = "live_overnight_force_exit"
         elif now.time() >= strategy.force_exit_clock:
             reason = "live_force_exit"
-        elif latest.close <= entry_price * (1.0 - strategy.stop_loss_pct):
+        elif latest.low <= entry_price * (1.0 - strategy.stop_loss_pct):
             reason = "live_stop_loss"
-        elif latest.close >= entry_price * (1.0 + strategy.take_profit_pct):
+        elif (
+            strategy.partial_take_profit_pct > 0
+            and stages < 2
+            and shares > 1
+            and latest.high >= entry_price * (1.0 + partial_threshold)
+        ):
+            partial_shares = max(1, min(shares - 1, math.floor(shares * strategy.partial_sell_ratio)))
+            return self._submit_live_sell(client, now, strategy, position, latest, "live_partial_take_profit", shares_to_sell=partial_shares)
+        elif latest.high >= entry_price * (1.0 + strategy.take_profit_pct):
             reason = "live_take_profit"
-        elif highest_price > entry_price and latest.close <= highest_price * (1.0 - strategy.trailing_stop_pct):
+        elif highest_price > entry_price and latest.low <= highest_price * (1.0 - strategy.trailing_stop_pct):
             reason = "live_trailing_stop"
         if not reason:
             return False
@@ -1002,24 +1193,37 @@ class LiveTrader:
             self._set_trade_message(f"주문 실패: BUY {bar.symbol} ({_order_message(response)})")
             self._log_decision("order_failed", now, side="buy", symbol=bar.symbol, shares=shares, price=bar.close, response=response)
             return False
+        order_meta = parse_order_response(response)
         gross = shares * bar.close
-        cost = gross * strategy.commission_rate
-        self.cash = round(max(0.0, self.cash - gross - cost), 2)
-        self.positions.append(
-            {
-                "symbol": bar.symbol,
-                "shares": shares,
-                "entry_price": bar.close,
-                "highest_price": bar.close,
-                "entry_time": (trade_timestamp or now).isoformat(sep=" "),
-            }
-        )
+        cost = gross * (strategy.commission_rate + strategy.slippage_rate)
+        with self.lock:
+            self.cash = round(max(0.0, self.cash - gross - cost), 2)
+            self.positions.append(
+                {
+                    "symbol": bar.symbol,
+                    "shares": shares,
+                    "entry_price": bar.close,
+                    "highest_price": bar.close,
+                    "entry_time": (trade_timestamp or now).isoformat(sep=" "),
+                    "order_no": order_meta.get("order_no", ""),
+                }
+            )
+        # 라이브 모드: KIS 잔고 조회로 실제 체결가/수량 보정
+        actual_fill = self._reconcile_after_order(client, bar.symbol, "buy", now)
+        actual_position = next((pos for pos in self.positions if str(pos.get("symbol") or "") == bar.symbol), None)
+        actual_shares = int(actual_position.get("shares") or 0) if actual_position else shares
+        actual_price = float(actual_position.get("entry_price") or 0.0) if actual_position else bar.close
+        if actual_shares <= 0:
+            actual_shares = shares
+            actual_price = bar.close
+        gross = actual_shares * actual_price
+        cost = gross * (strategy.commission_rate + strategy.slippage_rate)
         trade = ScannerTrade(
             timestamp=trade_timestamp or now,
             action="BUY",
             symbol=bar.symbol,
-            shares=shares,
-            price=round(bar.close, 4),
+            shares=actual_shares,
+            price=round(actual_price, 4),
             gross=round(gross, 2),
             cost=round(cost, 2),
             realized_pnl=0.0,
@@ -1033,8 +1237,8 @@ class LiveTrader:
             now,
             side="buy",
             symbol=bar.symbol,
-            shares=shares,
-            price=bar.close,
+            shares=actual_shares,
+            price=actual_price,
             reason=reason,
             response=response,
             cash_after=self.cash,
@@ -1059,25 +1263,56 @@ class LiveTrader:
         reason: str,
         *,
         trade_timestamp: datetime | None = None,
+        shares_to_sell: int | None = None,
     ) -> bool:
         symbol = str(position.get("symbol") or "")
         shares = int(position.get("shares") or 0)
         entry_price = float(position.get("entry_price") or 0.0)
-        response = self._place_order(client, "sell", symbol, shares, live=True, price=latest.close)
+        order_shares = max(0, min(shares, shares_to_sell or shares))
+        if order_shares <= 0:
+            return False
+        response = self._place_order(client, "sell", symbol, order_shares, live=True, price=latest.close)
         if not _order_succeeded(response, True):
             self._set_trade_message(f"주문 실패: SELL {symbol} ({_order_message(response)})")
-            self._log_decision("order_failed", now, side="sell", symbol=symbol, shares=shares, price=latest.close, response=response)
+            self._log_decision("order_failed", now, side="sell", symbol=symbol, shares=order_shares, price=latest.close, response=response)
             return False
-        gross = shares * latest.close
-        cost = gross * (strategy.commission_rate + strategy.sell_tax_rate)
-        realized_pnl = gross - cost - (entry_price * shares)
-        self.cash = round(self.cash + gross - cost, 2)
-        self.positions = [current for current in self.positions if current is not position and current.get("symbol") != symbol]
+        order_meta = parse_order_response(response)
+        gross = order_shares * latest.close
+        cost = gross * (strategy.commission_rate + strategy.sell_tax_rate + strategy.slippage_rate)
+        realized_pnl = gross - cost - (entry_price * order_shares)
+        remaining_shares = shares - order_shares
+        action = "SELL_PARTIAL" if remaining_shares > 0 else "SELL_ALL"
+        cash_before = self.cash
+        with self.lock:
+            self.cash = round(self.cash + gross - cost, 2)
+            if remaining_shares > 0:
+                position["shares"] = remaining_shares
+                position["partial_taken"] = True
+                position["partial_stages"] = int(position.get("partial_stages") or 0) + 1
+            else:
+                self.positions = [current for current in self.positions if current is not position and current.get("symbol") != symbol]
+        # 라이브 모드: KIS 잔고 조회로 실제 체결 결과 보정
+        actual_fill = self._reconcile_after_order(client, symbol, "sell", now)
+        if actual_fill is not None:
+            actual_remaining = int(actual_fill.get("quantity") or 0)
+            # 보수적 보정: 잔고에 의해 실제 처분된 수량 추정
+            estimated_filled = max(0, shares - actual_remaining)
+            if estimated_filled > 0 and estimated_filled != order_shares:
+                order_shares = estimated_filled
+                gross = order_shares * latest.close
+                cost = gross * (strategy.commission_rate + strategy.sell_tax_rate + strategy.slippage_rate)
+                realized_pnl = gross - cost - (entry_price * order_shares)
+                action = "SELL_PARTIAL" if actual_remaining > 0 else "SELL_ALL"
+            cash_diff = self.cash - cash_before
+            if abs(cash_diff) < 1.0 and self.cash <= cash_before:
+                # reconcile에서 실제 cash 갱신을 못한 경우 추정치 유지
+                pass
+        _ = order_meta
         trade = ScannerTrade(
             timestamp=trade_timestamp or now,
-            action="SELL_ALL",
+            action=action,
             symbol=symbol,
-            shares=shares,
+            shares=order_shares,
             price=round(latest.close, 4),
             gross=round(gross, 2),
             cost=round(cost, 2),
@@ -1092,7 +1327,7 @@ class LiveTrader:
             now,
             side="sell",
             symbol=symbol,
-            shares=shares,
+            shares=order_shares,
             price=latest.close,
             reason=reason,
             response=response,
@@ -1101,7 +1336,7 @@ class LiveTrader:
         )
         with self.lock:
             self.status["orders"] = int(self.status.get("orders", 0)) + 1
-            self.status["trade_message"] = f"최근 주문: SELL {trade.symbol} {trade.shares}주 ({trade.reason})"
+            self.status["trade_message"] = f"최근 주문: {trade.action} {trade.symbol} {trade.shares}주 ({trade.reason})"
         return True
 
     def _live_direct_entry_candidate(
@@ -1137,6 +1372,8 @@ class LiveTrader:
         vwap = _latest_vwap(current_bars)
         if vwap > 0 and latest.close < vwap * profile.min_vwap_ratio:
             return None
+        if self.market == DOMESTIC_ETF_MARKET and not self._domestic_etf_index_proxy_ok(now):
+            return None
         if vwap > 0 and profile.max_extension_pct is not None and (latest.close / vwap) - 1.0 > profile.max_extension_pct:
             return None
         lookback = current_bars[max(0, len(current_bars) - 4)]
@@ -1151,6 +1388,22 @@ class LiveTrader:
         breakout_bonus = 1.0 if opening_breakout else 0.0
         score = (setup_move * 100.0) + min(volume_ratio, 5.0) + breakout_bonus
         return score, latest, profile.reason
+
+    def _domestic_etf_index_proxy_ok(self, now: datetime) -> bool:
+        proxy_states = []
+        for proxy_symbol in DOMESTIC_ETF_INDEX_PROXIES:
+            current_bars = sorted(
+                (bar for bar in self.bars if bar.symbol == proxy_symbol and bar.session == now.date()),
+                key=lambda bar: bar.timestamp,
+            )
+            if len(current_bars) < 2:
+                continue
+            vwap = _latest_vwap(current_bars)
+            proxy_states.append(vwap > 0 and current_bars[-1].close >= vwap)
+        # 데이터가 부족하면 진입 차단 (전일 종가 시드만 있는 장 초반 보호)
+        if not proxy_states:
+            return False
+        return any(proxy_states)
 
     def _log_direct_entry_rejections(self, now: datetime, strategy: StockScannerConfig) -> None:
         if not self.active_symbols:
@@ -1193,6 +1446,16 @@ class LiveTrader:
                 max_extension_pct=strategy.max_extension_pct,
                 reason="live_overseas_momentum_entry",
             )
+        if self.market == DOMESTIC_ETF_MARKET:
+            return DirectEntryProfile(
+                min_bars=max(2, strategy.volume_sma + 1),
+                min_volume_ratio=max(1.0, strategy.volume_factor),
+                min_vwap_ratio=0.999,
+                min_lookback_move=0.0004,
+                max_setup_move=strategy.gap_max_pct,
+                max_extension_pct=strategy.max_extension_pct,
+                reason="live_domestic_etf_vwap_entry",
+            )
         return DirectEntryProfile(max_extension_pct=strategy.max_extension_pct)
 
     def _set_trade_message(self, message: str) -> None:
@@ -1207,8 +1470,10 @@ class LiveTrader:
             prefix = "프리장 "
         else:
             prefix = ""
-        if now.time() >= strategy.force_exit_clock:
-            return f"{strategy.force_exit_time} 이후 신규 진입 중단"
+        if now.time() < strategy.entry_start_clock:
+            return f"{strategy.entry_start_time} 전 신규 진입 대기"
+        if now.time() >= strategy.entry_cutoff_clock:
+            return f"{strategy.entry_cutoff_time or strategy.force_exit_time} 이후 신규 진입 중단"
         entry_count = _live_buy_count_for_session(self.report_dir, now.date())
         if entry_count >= strategy.max_trades_per_day:
             return _daily_entry_limit_message(entry_count, strategy.max_trades_per_day)
@@ -1252,6 +1517,29 @@ class LiveTrader:
                 trailing_stop_pct=max(self.strategy.trailing_stop_pct, 0.014),
                 daily_stop_loss_pct=min(self.strategy.daily_stop_loss_pct, 0.025),
                 max_trades_per_day=min(self.strategy.max_trades_per_day, 3),
+            )
+        if self.market == DOMESTIC_ETF_MARKET and self.config.mode == "live":
+            return replace(
+                self.strategy,
+                observation_minutes=min(self.strategy.observation_minutes, 5),
+                top_value_rank=max(self.strategy.top_value_rank, 10),
+                gap_min_pct=min(self.strategy.gap_min_pct, 0.0),
+                gap_max_pct=min(max(self.strategy.gap_max_pct, 0.03), 0.06),
+                volume_sma=min(self.strategy.volume_sma, 2),
+                volume_factor=min(self.strategy.volume_factor, 1.05),
+                atr_period=min(self.strategy.atr_period, 3),
+                min_atr_pct=min(self.strategy.min_atr_pct, 0.0005),
+                max_atr_pct=min(max(self.strategy.max_atr_pct, 0.015), 0.03),
+                min_edge_bps=min(self.strategy.min_edge_bps, 3.0),
+                max_extension_pct=min(max(self.strategy.max_extension_pct, 0.003), 0.006),
+                risk_per_trade_pct=min(self.strategy.risk_per_trade_pct, 0.01),
+                stop_loss_pct=min(self.strategy.stop_loss_pct, 0.0025),
+                take_profit_pct=min(max(self.strategy.take_profit_pct, 0.0025), 0.004),
+                trailing_stop_pct=min(max(self.strategy.trailing_stop_pct, 0.0015), 0.003),
+                daily_stop_loss_pct=min(self.strategy.daily_stop_loss_pct, 0.007),
+                daily_take_profit_pct=max(self.strategy.daily_take_profit_pct, 0.004),
+                max_trades_per_day=min(max(self.strategy.max_trades_per_day, 3), 5),
+                cooldown_bars=max(self.strategy.cooldown_bars, 1),
             )
         if self.market == DEFAULT_MARKET and self.config.mode == "live":
             return replace(
@@ -1363,6 +1651,96 @@ class LiveTrader:
             order_division="01",
             live=live,
         )
+
+    def _query_balance_holding(self, client: KisClient, symbol: str) -> dict[str, float] | None:
+        """라이브 모드에서 KIS 잔고 조회로 해당 종목의 실제 보유 수량/평균단가/현금을 가져온다.
+        실패하거나 paper 모드면 None."""
+        if self.config.mode != "live" or not self.config.account_no:
+            return None
+        try:
+            if self.market == OVERSEAS_MARKET:
+                response = client.inquire_overseas_balance(
+                    account_no=self.config.account_no,
+                    product_code=self.config.product_code,
+                    exchange_code=self.config.exchange_code,
+                    currency=self.config.currency,
+                    live=True,
+                )
+                parsed = parse_overseas_balance_response(response)
+            else:
+                response = client.inquire_balance(
+                    account_no=self.config.account_no,
+                    product_code=self.config.product_code,
+                    live=True,
+                )
+                parsed = parse_balance_response(response)
+        except Exception:  # noqa: BLE001
+            return None
+        if str(parsed.get("rt_cd") or "") not in {"0", ""}:
+            return None
+        target = symbol.strip().upper()
+        for holding in parsed.get("holdings") or []:
+            holding_symbol = str(holding.get("symbol") or "").strip().upper()
+            if holding_symbol == target:
+                return {
+                    "quantity": float(holding.get("quantity") or 0.0),
+                    "average_price": float(holding.get("average_price") or 0.0),
+                    "cash": float(parsed.get("cash") or 0.0),
+                }
+        return {"quantity": 0.0, "average_price": 0.0, "cash": float(parsed.get("cash") or 0.0)}
+
+    def _reconcile_after_order(
+        self,
+        client: KisClient,
+        symbol: str,
+        side: str,
+        now: datetime,
+    ) -> dict[str, float] | None:
+        """주문 직후 잔고를 조회해 self.cash, position[shares]/entry_price를 실제 값으로 보정.
+
+        주문 체결이 비동기일 수 있어 best-effort로 한 번만 시도한다. 실패 시 추정 값 유지.
+        """
+        holding = self._query_balance_holding(client, symbol)
+        if holding is None:
+            return None
+        actual_qty = int(holding["quantity"])
+        avg_price = float(holding["average_price"])
+        actual_cash = float(holding["cash"])
+        with self.lock:
+            position = next((pos for pos in self.positions if str(pos.get("symbol") or "") == symbol), None)
+            if side == "buy":
+                if actual_qty <= 0:
+                    self._log_decision(
+                        "fill_pending",
+                        now,
+                        side=side,
+                        symbol=symbol,
+                        message="잔고 미반영 (체결 지연 가능)",
+                    )
+                    return holding
+                if position:
+                    position["shares"] = actual_qty
+                    if avg_price > 0:
+                        position["entry_price"] = avg_price
+                        if float(position.get("highest_price") or 0.0) < avg_price:
+                            position["highest_price"] = avg_price
+            elif side == "sell":
+                if actual_qty <= 0 and position:
+                    self.positions = [p for p in self.positions if str(p.get("symbol") or "") != symbol]
+                elif position and actual_qty > 0:
+                    position["shares"] = actual_qty
+            if actual_cash > 0:
+                self.cash = round(actual_cash, 2)
+        self._log_decision(
+            "fill_reconciled",
+            now,
+            side=side,
+            symbol=symbol,
+            actual_qty=actual_qty,
+            avg_price=avg_price,
+            cash=actual_cash,
+        )
+        return holding
 
 
 _TRADERS: dict[str, LiveTrader] = {}
@@ -1524,33 +1902,22 @@ def _append_live_trade(trade, response: dict[str, Any], mode: str, trade_key: st
             json.dumps(response, ensure_ascii=False),
             trade_key,
         ])
+    _invalidate_trade_row_cache(report_dir)
 
 
 def _last_trade_key(report_dir: Path) -> str:
-    path = report_dir / "trades.csv"
-    if not path.exists():
-        return ""
-    with path.open(newline="", encoding="utf-8") as csv_file:
-        rows = list(csv.DictReader(csv_file))
+    rows = _load_trade_rows(report_dir)
     return rows[-1].get("trade_key", "") if rows else ""
 
 
 def _trade_key_exists(report_dir: Path, trade_key: str) -> bool:
     if not trade_key:
         return False
-    path = report_dir / "trades.csv"
-    if not path.exists():
-        return False
-    with path.open(newline="", encoding="utf-8") as csv_file:
-        return any(row.get("trade_key", "") == trade_key for row in csv.DictReader(csv_file))
+    return any(row.get("trade_key", "") == trade_key for row in _load_trade_rows(report_dir))
 
 
 def _open_positions_from_trades(report_dir: Path) -> tuple[list[dict[str, Any]], float]:
-    path = report_dir / "trades.csv"
-    if not path.exists():
-        return [], 0.0
-    with path.open(newline="", encoding="utf-8") as csv_file:
-        rows = list(csv.DictReader(csv_file))
+    rows = _load_trade_rows(report_dir)
     positions: dict[str, dict[str, Any]] = {}
     cash = 0.0
     for row in rows:
@@ -1569,6 +1936,16 @@ def _open_positions_from_trades(report_dir: Path) -> tuple[list[dict[str, Any]],
                 "highest_price": price,
                 "entry_time": str(row.get("timestamp") or ""),
             }
+        elif action == "SELL_PARTIAL" and symbol:
+            position = positions.get(symbol)
+            if position:
+                remaining = int(position.get("shares") or 0) - shares
+                if remaining > 0:
+                    position["shares"] = remaining
+                    position["partial_taken"] = True
+                    position["partial_stages"] = int(position.get("partial_stages") or 0) + 1
+                else:
+                    positions.pop(symbol, None)
         elif action.startswith("SELL") and symbol:
             positions.pop(symbol, None)
     return list(positions.values()), cash
@@ -1580,19 +1957,72 @@ def _open_position_from_trades(report_dir: Path) -> tuple[dict[str, Any] | None,
 
 
 def _live_buy_count_for_session(report_dir: Path, session: object) -> int:
-    path = report_dir / "trades.csv"
-    if not path.exists():
-        return 0
-    with path.open(newline="", encoding="utf-8") as csv_file:
-        rows = list(csv.DictReader(csv_file))
     count = 0
-    for row in rows:
+    for row in _load_trade_rows(report_dir):
         action = str(row.get("action") or "").upper()
         if action != "BUY":
             continue
         if _timestamp_date(row.get("timestamp")) == session:
             count += 1
     return count
+
+
+def _live_consecutive_losses(report_dir: Path, session: object) -> tuple[int, datetime | None]:
+    rows = _load_trade_rows(report_dir)
+    sell_rows = [
+        row
+        for row in rows
+        if str(row.get("action") or "").upper() == "SELL_ALL"
+        and _timestamp_date(row.get("timestamp")) == session
+    ]
+    count = 0
+    last_loss_at: datetime | None = None
+    for row in reversed(sell_rows):
+        if _float(row.get("realized_pnl")) >= 0:
+            break
+        count += 1
+        if last_loss_at is None:
+            last_loss_at = _timestamp_datetime(row.get("timestamp"))
+    return count, last_loss_at
+
+
+def _live_realized_today(report_dir: Path, session: object) -> float:
+    rows = _load_trade_rows(report_dir)
+    total = 0.0
+    for row in rows:
+        action = str(row.get("action") or "").upper()
+        if not action.startswith("SELL"):
+            continue
+        if _timestamp_date(row.get("timestamp")) != session:
+            continue
+        total += _float(row.get("realized_pnl"))
+    return total
+
+
+_TRADE_ROW_CACHE: dict[Path, tuple[int, list[dict[str, Any]]]] = {}
+
+
+def _load_trade_rows(report_dir: Path) -> list[dict[str, Any]]:
+    path = report_dir / "trades.csv"
+    if not path.exists():
+        _TRADE_ROW_CACHE.pop(path, None)
+        return []
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        return []
+    cached = _TRADE_ROW_CACHE.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    with path.open(newline="", encoding="utf-8") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    _TRADE_ROW_CACHE[path] = (mtime, rows)
+    return rows
+
+
+def _invalidate_trade_row_cache(report_dir: Path) -> None:
+    path = report_dir / "trades.csv"
+    _TRADE_ROW_CACHE.pop(path, None)
 
 
 def _daily_entry_limit_message(entry_count: int, max_trades_per_day: int) -> str:
@@ -1626,13 +2056,14 @@ def _write_live_metrics(metrics: dict[str, Any], report_dir: Path) -> None:
 def _idle_status(market: str = DEFAULT_MARKET) -> dict[str, Any]:
     market = _market(market)
     config = load_live_config(market)
+    selector = _selector_label(market)
     return {
         "running": False,
         "market": market,
         "message": "대기 중",
         "mode": config.mode,
-        "selector": _selector_label(market),
-        "selector_message": "시장 자동선별 대기" if market == DEFAULT_MARKET else "NASDAQ 자동선별 대기",
+        "selector": selector,
+        "selector_message": f"{selector} 대기",
         "active_symbols": [],
         "orders": 0,
         "seed_capital": config.seed_capital,
@@ -1677,7 +2108,12 @@ def _normalize_overseas_symbol(symbol: str) -> str:
 
 
 def _selector_label(market: str) -> str:
-    return "NASDAQ 자동선별" if _market(market) == OVERSEAS_MARKET else "자동선별"
+    market = _market(market)
+    if market == OVERSEAS_MARKET:
+        return "NASDAQ 자동선별"
+    if market == DOMESTIC_ETF_MARKET:
+        return "국내ETF 자동선별"
+    return "자동선별"
 
 
 def _session_label(session: str) -> str:
@@ -1695,11 +2131,21 @@ def _market(value: object) -> str:
 
 
 def _market_label(market: str) -> str:
-    return "해외" if _market(market) == OVERSEAS_MARKET else "국내"
+    market = _market(market)
+    if market == OVERSEAS_MARKET:
+        return "해외"
+    if market == DOMESTIC_ETF_MARKET:
+        return "국내ETF"
+    return "국내"
 
 
 def _strategy_name(market: str) -> str:
-    return "live_overseas_stock_scanner" if _market(market) == OVERSEAS_MARKET else "live_volatile_stock_scanner"
+    market = _market(market)
+    if market == OVERSEAS_MARKET:
+        return "live_overseas_stock_scanner"
+    if market == DOMESTIC_ETF_MARKET:
+        return "live_domestic_etf_scalp"
+    return "live_volatile_stock_scanner"
 
 
 def _reason_summary(reasons: list[str]) -> str:
@@ -1732,20 +2178,64 @@ def _reason_bucket(reason: str) -> str:
 
 
 def live_config_path(market: str = DEFAULT_MARKET) -> Path:
-    return OVERSEAS_LIVE_CONFIG_PATH if _market(market) == OVERSEAS_MARKET else LIVE_CONFIG_PATH
+    market = _market(market)
+    if market == OVERSEAS_MARKET:
+        return OVERSEAS_LIVE_CONFIG_PATH
+    if market == DOMESTIC_ETF_MARKET:
+        return DOMESTIC_ETF_LIVE_CONFIG_PATH
+    return LIVE_CONFIG_PATH
 
 
 def kis_keys_path(market: str = DEFAULT_MARKET) -> Path:
-    return OVERSEAS_KIS_KEYS_PATH if _market(market) == OVERSEAS_MARKET else KIS_KEYS_PATH
+    market = _market(market)
+    if market == OVERSEAS_MARKET:
+        return OVERSEAS_KIS_KEYS_PATH
+    if market == DOMESTIC_ETF_MARKET:
+        return DOMESTIC_ETF_KIS_KEYS_PATH
+    return KIS_KEYS_PATH
 
 
 def live_report_dir(market: str = DEFAULT_MARKET) -> Path:
-    return OVERSEAS_LIVE_REPORT_DIR if _market(market) == OVERSEAS_MARKET else LIVE_REPORT_DIR
+    market = _market(market)
+    if market == OVERSEAS_MARKET:
+        return OVERSEAS_LIVE_REPORT_DIR
+    if market == DOMESTIC_ETF_MARKET:
+        return DOMESTIC_ETF_LIVE_REPORT_DIR
+    return LIVE_REPORT_DIR
 
 
 def _excluded_name(name: str) -> bool:
     upper = name.upper()
     return any(token in upper for token in ("ETF", "ETN", "스팩", "SPAC"))
+
+
+def _included_domestic_etf(row: dict[str, Any], symbol: str) -> bool:
+    name = _row_name(row) or DOMESTIC_ETF_UNIVERSE.get(symbol, "")
+    if _excluded_domestic_etf_name(name):
+        return False
+    upper = name.upper()
+    if symbol in DOMESTIC_ETF_UNIVERSE:
+        return True
+    brands = ("KODEX", "TIGER", "ACE", "SOL", "HANARO", "KBSTAR", "PLUS", "ARIRANG", "KOSEF", "TIMEFOLIO", "RISE")
+    return "ETF" in upper or any(brand in upper for brand in brands)
+
+
+def _excluded_domestic_etf_name(name: str) -> bool:
+    upper = name.upper()
+    tokens = (
+        "ETN",
+        "스팩",
+        "SPAC",
+        "레버리지",
+        "인버스",
+        "곱버스",
+        "선물인버스",
+        "2X",
+        "3X",
+        "2배",
+        "3배",
+    )
+    return any(token in upper for token in tokens)
 
 
 def _excluded_overseas_name(name: str, symbol: str) -> bool:
@@ -1772,6 +2262,16 @@ def _excluded_overseas_name(name: str, symbol: str) -> bool:
 def _source_priority(row: dict[str, Any]) -> int:
     weights = {"trade_value": 4, "volume_surge": 4, "volume": 3, "gap_up": 3, "strength": 2, "fallback": 1}
     return sum(weights.get(source, 0) for source in set(row.get("_sources", [])))
+
+
+def _prepend_symbols(symbols: list[str], preferred: list[str], limit: int) -> list[str]:
+    selected: list[str] = []
+    for symbol in preferred + symbols:
+        if symbol not in selected:
+            selected.append(symbol)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def _row_name(row: dict[str, Any]) -> str:
@@ -1842,12 +2342,17 @@ def _position_entry_date(position: dict[str, Any] | None) -> object | None:
 
 
 def _timestamp_date(value: Any) -> object | None:
+    parsed = _timestamp_datetime(value)
+    return parsed.date() if parsed else None
+
+
+def _timestamp_datetime(value: Any) -> datetime | None:
     value = str(value or "").strip()
     if not value:
         return None
     for candidate in (value, value.replace("T", " ")):
         try:
-            return datetime.fromisoformat(candidate).date()
+            return datetime.fromisoformat(candidate)
         except ValueError:
             pass
     return None
