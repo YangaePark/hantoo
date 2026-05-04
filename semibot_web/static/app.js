@@ -103,6 +103,36 @@ function renderReport(report) {
   renderTrades(report.trades || []);
   renderEquityChart(report.equity_curve || []);
   renderPnlChart(report.trades || []);
+  renderToneSummary(report.tone_summary || {});
+}
+
+function toneLabel(tone) {
+  const key = String(tone || "neutral").toLowerCase();
+  if (key === "aggressive") return "공격";
+  if (key === "conservative") return "보수";
+  if (key === "premarket") return "프리장";
+  return "중립";
+}
+
+function applyToneBadge(tone) {
+  const badge = $("strategyToneBadge");
+  const normalized = String(tone || "neutral").toLowerCase();
+  badge.classList.remove("aggressive", "neutral", "conservative", "premarket");
+  badge.classList.add(normalized);
+  badge.textContent = toneLabel(normalized);
+}
+
+function renderToneSummary(summary) {
+  const latestTone = String(summary.latest_tone || "neutral").toLowerCase();
+  $("toneNow").textContent = `${toneLabel(latestTone)} (${summary.profile_mode || "auto"})`;
+  $("toneSwitches").textContent = `${Number(summary.tone_switches || 0).toLocaleString("ko-KR")}회`;
+  $("toneReentryBlocks").textContent = `${Number(summary.stop_loss_reentry_blocks || 0).toLocaleString("ko-KR")}회`;
+  $("toneAvoidedLoss").textContent = marketMoney(summary.estimated_avoided_loss || 0);
+  const counts = summary.tone_counts || {};
+  const labels = ["aggressive", "neutral", "conservative"]
+    .map((tone) => `${toneLabel(tone)} ${Number(counts[tone] || 0)}회`)
+    .join(" / ");
+  $("toneSummaryMeta").textContent = labels || "집계 데이터 없음";
 }
 
 function renderTrades(trades) {
@@ -333,6 +363,8 @@ async function loadLiveStatus() {
   if (status.token_status && status.token_status !== "대기") {
     pieces.push(`토큰: ${status.token_status}`);
   }
+  pieces.push(`프로파일: ${status.strategy_profile_mode || "auto"}`);
+  if (status.strategy_tone) pieces.push(`톤: ${toneLabel(status.strategy_tone)}`);
   if (status.session_label) pieces.push(`세션: ${status.session_label}`);
   if (status.last_tick) pieces.push(`최근: ${status.last_tick}`);
   if (positions.length) {
@@ -340,6 +372,7 @@ async function loadLiveStatus() {
   }
   if (status.last_error) pieces.push(`오류: ${status.last_error}`);
   $("liveStatus").textContent = pieces.join(" / ");
+  applyToneBadge(status.strategy_tone);
   renderCurrentDecision(status);
   return status;
 }

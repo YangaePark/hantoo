@@ -245,6 +245,8 @@ class LiveTrader:
             "token_status": "대기",
             "token_expires_at": "",
             "trade_message": "매수 조건 대기",
+            "strategy_tone": "neutral",
+            "strategy_profile_mode": "auto" if strategy.adaptive_market_regime else "fixed",
         }
         self.bars: list[StockBar] = []
         self.seeded_previous_close: dict[str, object] = {}
@@ -356,13 +358,18 @@ class LiveTrader:
             try:
                 parsed = self._fetch_price(client, symbol)
             except Exception as exc:  # noqa: BLE001
-                price_errors.append({"symbol": symbol, "error": str(exc)})
+                error_text = str(exc)
+                price_errors.append({"symbol": symbol, "error": error_text})
+                if _is_rate_limit_error(error_text):
+                    # API 초당 제한이 감지되면 즉시 텀을 늘려 호출 밀도를 낮춘다.
+                    time.sleep(0.25 if self.market == OVERSEAS_MARKET else 0.15)
                 continue
             if parsed["price"] <= 0:
                 price_errors.append(_price_error_payload(symbol, "price<=0", parsed))
                 continue
             self._add_tick(symbol, strategy_now, parsed)
             updated_symbols.add(symbol)
+            time.sleep(0.09 if self.market == OVERSEAS_MARKET else 0.05)
         self._evaluate(client, strategy_now, updated_symbols)
         self._error_streak = 0
         bar_status = self._bar_collection_status(strategy_now)
@@ -370,6 +377,7 @@ class LiveTrader:
             "cycle",
             strategy_now,
             session=session,
+            strategy_tone=str(self.status.get("strategy_tone", "neutral")),
             active_symbols=list(self.active_symbols),
             position=self.position or {},
             positions=[dict(position) for position in self.positions],
@@ -429,7 +437,7 @@ class LiveTrader:
         msg = str(exc).lower()
         if any(token in msg for token in ("token", "401", "403", "unauthor")):
             kind = "token"
-        elif any(token in msg for token in ("rate", "limit", "429", "too many")):
+        elif _is_rate_limit_error(msg):
             kind = "rate_limit"
         elif any(token in msg for token in ("timeout", "timed out")):
             kind = "timeout"
@@ -1042,6 +1050,23 @@ class LiveTrader:
                 max_positions=self.config.max_positions,
             )
             return False
+        if strategy.stop_loss_reentry_block_minutes > 0:
+            blocked_until = _live_symbol_stop_loss_reentry_block_until(
+                self.report_dir,
+                symbol,
+                now.date(),
+                strategy.stop_loss_reentry_block_minutes,
+            )
+            if blocked_until and now < blocked_until:
+                self._set_trade_message(f"{symbol}: 손절 후 재진입 대기 ({blocked_until.strftime('%H:%M')}까지)")
+                self._log_decision(
+                    "entry_skip",
+                    now,
+                    symbol=symbol,
+                    reason="stop_loss_reentry_cooldown",
+                    blocked_until=blocked_until.strftime("%Y-%m-%d %H:%M:%S"),
+                )
+                return False
         entry_count = _live_buy_count_for_session(self.report_dir, now.date())
         if entry_count >= strategy.max_trades_per_day:
             self._set_trade_message(_daily_entry_limit_message(entry_count, strategy.max_trades_per_day))
@@ -1364,6 +1389,11 @@ class LiveTrader:
             return None
         if latest.volume <= 0:
             return None
+        # 직전 봉 고점을 넘지 못하면 모멘텀 지속 신호로 보지 않는다.
+        if len(current_bars) >= 2:
+            prev_bar = current_bars[-2]
+            if latest.close <= prev_bar.high * (1.0 + (strategy.min_edge_rate * 0.5)):
+                return None
         previous_volumes = [float(bar.volume) for bar in current_bars[:-1] if bar.volume > 0]
         volume_avg = sum(previous_volumes[-strategy.volume_sma :]) / min(len(previous_volumes), strategy.volume_sma) if previous_volumes else 0.0
         volume_ratio = latest.volume / volume_avg if volume_avg else 1.0
@@ -1439,10 +1469,11 @@ class LiveTrader:
                     reason="live_premarket_momentum_entry",
                 )
             return DirectEntryProfile(
-                min_bars=4,
-                min_volume_ratio=max(1.0, min(strategy.volume_factor, 1.3)),
-                min_vwap_ratio=0.998,
-                min_lookback_move=0.0015,
+                min_bars=max(4, strategy.volume_sma + 1),
+                min_volume_ratio=max(1.2, min(strategy.volume_factor, 1.6)),
+                min_vwap_ratio=1.0,
+                min_lookback_move=0.002,
+                require_opening_breakout=True,
                 max_extension_pct=strategy.max_extension_pct,
                 reason="live_overseas_momentum_entry",
             )
@@ -1497,6 +1528,7 @@ class LiveTrader:
 
     def _active_strategy(self, now: datetime) -> StockScannerConfig:
         if self.market == OVERSEAS_MARKET and self._market_session(now) == SESSION_PREMARKET:
+            self._set_strategy_tone("premarket")
             return replace(
                 self.strategy,
                 observation_minutes=30,
@@ -1518,8 +1550,19 @@ class LiveTrader:
                 daily_stop_loss_pct=min(self.strategy.daily_stop_loss_pct, 0.025),
                 max_trades_per_day=min(self.strategy.max_trades_per_day, 3),
             )
+        if self.market == OVERSEAS_MARKET and self.config.mode == "live":
+            base = replace(
+                self.strategy,
+                observation_minutes=min(self.strategy.observation_minutes, 15),
+                volume_factor=max(1.25, self.strategy.volume_factor),
+                min_atr_pct=max(self.strategy.min_atr_pct, 0.004),
+                max_trades_per_day=min(self.strategy.max_trades_per_day, 6),
+            )
+            tone = self._market_tone(now, base)
+            self._set_strategy_tone(tone)
+            return self._strategy_by_tone(base, tone)
         if self.market == DOMESTIC_ETF_MARKET and self.config.mode == "live":
-            return replace(
+            base = replace(
                 self.strategy,
                 observation_minutes=min(self.strategy.observation_minutes, 5),
                 top_value_rank=max(self.strategy.top_value_rank, 10),
@@ -1541,8 +1584,11 @@ class LiveTrader:
                 max_trades_per_day=min(max(self.strategy.max_trades_per_day, 3), 5),
                 cooldown_bars=max(self.strategy.cooldown_bars, 1),
             )
+            tone = self._market_tone(now, base)
+            self._set_strategy_tone(tone)
+            return self._strategy_by_tone(base, tone)
         if self.market == DEFAULT_MARKET and self.config.mode == "live":
-            return replace(
+            base = replace(
                 self.strategy,
                 observation_minutes=min(self.strategy.observation_minutes, 10),
                 top_value_rank=max(self.strategy.top_value_rank, 8),
@@ -1558,7 +1604,78 @@ class LiveTrader:
                 max_trades_per_day=max(self.strategy.max_trades_per_day, 8),
                 cooldown_bars=min(self.strategy.cooldown_bars, 1),
             )
+            tone = self._market_tone(now, base)
+            self._set_strategy_tone(tone)
+            return self._strategy_by_tone(base, tone)
+        self._set_strategy_tone("neutral")
         return self.strategy
+
+    def _set_strategy_tone(self, tone: str) -> None:
+        with self.lock:
+            self.status["strategy_tone"] = tone
+
+    def _market_tone(self, now: datetime, strategy: StockScannerConfig) -> str:
+        if not strategy.adaptive_market_regime:
+            return "neutral"
+        candidates = list(DOMESTIC_ETF_INDEX_PROXIES) if self.market != OVERSEAS_MARKET else []
+        candidates.extend(self.active_symbols)
+        symbols: list[str] = []
+        for symbol in candidates:
+            if symbol not in symbols:
+                symbols.append(symbol)
+        if not symbols:
+            return "neutral"
+
+        move_samples: list[float] = []
+        above_vwap = 0
+        for symbol in symbols[:8]:
+            symbol_bars = sorted((bar for bar in self.bars if bar.symbol == symbol), key=lambda bar: bar.timestamp)
+            current_bars = [bar for bar in symbol_bars if bar.session == now.date()]
+            if len(current_bars) < 3:
+                continue
+            latest = current_bars[-1]
+            previous_close = _previous_close_for(symbol_bars, latest)
+            if previous_close <= 0:
+                continue
+            move_samples.append((latest.close / previous_close) - 1.0)
+            vwap = _latest_vwap(current_bars)
+            if vwap > 0 and latest.close >= vwap:
+                above_vwap += 1
+
+        sample_count = len(move_samples)
+        if sample_count < 3:
+            return "neutral"
+        avg_move = sum(move_samples) / sample_count
+        breadth = above_vwap / sample_count
+        if avg_move >= 0.006 and breadth >= 0.6:
+            return "aggressive"
+        if avg_move <= 0.0015 or breadth < 0.45:
+            return "conservative"
+        return "neutral"
+
+    def _strategy_by_tone(self, strategy: StockScannerConfig, tone: str) -> StockScannerConfig:
+        if tone == "aggressive":
+            return replace(
+                strategy,
+                volume_factor=max(1.1, strategy.volume_factor - 0.15),
+                gap_min_pct=max(0.0, strategy.gap_min_pct - 0.002),
+                risk_per_trade_pct=min(0.015, strategy.risk_per_trade_pct * 1.15),
+                max_trades_per_day=min(12, strategy.max_trades_per_day + 2),
+                max_position_pct=min(1.0, strategy.max_position_pct * 1.1),
+            )
+        if tone == "conservative":
+            return replace(
+                strategy,
+                entry_start_time=_add_minutes_to_clock(strategy.entry_start_clock, 20),
+                volume_factor=min(2.2, strategy.volume_factor + 0.3),
+                gap_min_pct=min(0.03, strategy.gap_min_pct + 0.003),
+                risk_per_trade_pct=max(0.004, strategy.risk_per_trade_pct * 0.7),
+                max_trades_per_day=max(3, min(strategy.max_trades_per_day, 5)),
+                max_position_pct=max(0.2, strategy.max_position_pct * 0.75),
+                stop_loss_pct=max(strategy.stop_loss_pct, 0.011),
+                trailing_stop_pct=max(strategy.trailing_stop_pct, 0.012),
+            )
+        return strategy
 
     def _symbol_entry_reason(self, symbol: str, now: datetime) -> str:
         strategy = self._active_strategy(now)
@@ -1986,6 +2103,35 @@ def _live_consecutive_losses(report_dir: Path, session: object) -> tuple[int, da
     return count, last_loss_at
 
 
+def _live_symbol_stop_loss_reentry_block_until(
+    report_dir: Path,
+    symbol: str,
+    session: object,
+    block_minutes: int,
+) -> datetime | None:
+    if block_minutes <= 0:
+        return None
+    target = str(symbol or "").strip().upper()
+    if not target:
+        return None
+    for row in reversed(_load_trade_rows(report_dir)):
+        if _timestamp_date(row.get("timestamp")) != session:
+            continue
+        if str(row.get("symbol") or "").strip().upper() != target:
+            continue
+        action = str(row.get("action") or "").upper()
+        reason = str(row.get("reason") or "")
+        if action.startswith("SELL") and reason == "live_stop_loss":
+            exited_at = _timestamp_datetime(row.get("timestamp"))
+            if not exited_at:
+                return None
+            return exited_at + timedelta(minutes=max(1, int(block_minutes)))
+        if action == "BUY":
+            # 최근 이벤트가 BUY라면 직전 손절 블록을 이미 통과한 상태로 본다.
+            return None
+    return None
+
+
 def _live_realized_today(report_dir: Path, session: object) -> float:
     rows = _load_trade_rows(report_dir)
     total = 0.0
@@ -2087,6 +2233,8 @@ def _idle_status(market: str = DEFAULT_MARKET) -> dict[str, Any]:
         "token_status": "대기",
         "token_expires_at": "",
         "trade_message": "자동매매 시작 전",
+        "strategy_tone": "neutral",
+        "strategy_profile_mode": "auto",
     }
 
 
@@ -2411,11 +2559,32 @@ def _first_row_float(row: dict[str, Any], keys: tuple[str, ...]) -> float:
     return 0.0
 
 
+def _add_minutes_to_clock(value: clock_time, minutes: int) -> str:
+    base = datetime.combine(datetime.now().date(), value)
+    shifted = base + timedelta(minutes=minutes)
+    return shifted.strftime("%H:%M")
+
+
 def _float(value: object) -> float:
     try:
         return float(str(value).replace(",", ""))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _is_rate_limit_error(message: object) -> bool:
+    text = str(message or "").lower()
+    return any(
+        token in text
+        for token in (
+            "rate",
+            "limit",
+            "429",
+            "too many",
+            "egw00201",
+            "초당 거래건수 초과",
+        )
+    )
 
 
 def _positive_float(value: object, default: float) -> float:

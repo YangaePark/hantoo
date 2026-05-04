@@ -16,6 +16,8 @@ class StockScannerConfig:
     initial_capital: float = 1_000_000.0
     entry_start_time: str = ""
     entry_cutoff_time: str = ""
+    adaptive_market_regime: bool = False
+    stop_loss_reentry_block_minutes: int = 0
     observation_minutes: int = 20
     top_value_rank: int = 5
     gap_min_pct: float = 0.02

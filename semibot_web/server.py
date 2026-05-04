@@ -205,6 +205,7 @@ def load_report(name: str) -> dict:
     metrics = _read_json_file(report_dir / "metrics.json")
     trades = _read_csv_file(report_dir / "trades.csv")
     equity = _read_csv_file(report_dir / "equity_curve.csv")
+    tone_summary = _build_tone_summary(report_dir, trades)
     return {
         "name": name,
         "label": _report_label(name, metrics),
@@ -212,6 +213,72 @@ def load_report(name: str) -> dict:
         "trades": trades,
         "equity_curve": equity,
         "current": current_snapshot(metrics, trades, equity),
+        "tone_summary": tone_summary,
+    }
+
+
+def _build_tone_summary(report_dir: Path, trades: list[dict]) -> dict:
+    decision_path = report_dir / "decision_log.jsonl"
+    if not decision_path.exists():
+        return {
+            "latest_tone": "neutral",
+            "tone_switches": 0,
+            "tone_counts": {},
+            "stop_loss_reentry_blocks": 0,
+            "estimated_avoided_loss": 0.0,
+            "profile_mode": "auto",
+        }
+
+    decisions: list[dict] = []
+    with decision_path.open(encoding="utf-8") as log_file:
+        for line in log_file:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                decisions.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    tone_counts: dict[str, int] = {}
+    latest_tone = "neutral"
+    previous_tone = ""
+    switches = 0
+    profile_mode = "auto"
+    for row in decisions:
+        tone = str(row.get("strategy_tone") or "").strip().lower()
+        if not tone:
+            continue
+        tone_counts[tone] = tone_counts.get(tone, 0) + 1
+        latest_tone = tone
+        if previous_tone and tone != previous_tone:
+            switches += 1
+        previous_tone = tone
+
+    reentry_blocks = sum(
+        1
+        for row in decisions
+        if str(row.get("event") or "") == "entry_skip"
+        and str(row.get("reason") or "") == "stop_loss_reentry_cooldown"
+    )
+
+    stop_losses = [
+        abs(_to_number(trade.get("realized_pnl", 0)))
+        for trade in trades
+        if str(trade.get("action") or "").startswith("SELL")
+        and str(trade.get("reason") or "") == "live_stop_loss"
+        and _to_number(trade.get("realized_pnl", 0)) < 0
+    ]
+    avg_stop_loss = (sum(stop_losses) / len(stop_losses)) if stop_losses else 0.0
+    estimated_avoided_loss = round(reentry_blocks * avg_stop_loss, 2)
+
+    return {
+        "latest_tone": latest_tone,
+        "tone_switches": switches,
+        "tone_counts": tone_counts,
+        "stop_loss_reentry_blocks": reentry_blocks,
+        "estimated_avoided_loss": estimated_avoided_loss,
+        "profile_mode": profile_mode,
     }
 
 
@@ -449,6 +516,11 @@ def load_live_strategy_config(market: str = DEFAULT_MARKET, seed_capital: float 
         path = SCANNER_CONFIG_PATH
     if path.exists():
         config = StockScannerConfig.from_dict(_read_json_file(path))
+    # 프리셋 파일 분리 대신 장세 기반 자동 프로파일을 기본 모드로 강제한다.
+    reentry_block = config.stop_loss_reentry_block_minutes
+    if reentry_block <= 0:
+        reentry_block = 25 if market == OVERSEAS_MARKET else 20
+    config = replace(config, adaptive_market_regime=True, stop_loss_reentry_block_minutes=reentry_block)
     if seed_capital and seed_capital > 0:
         return replace(config, initial_capital=seed_capital)
     return config
