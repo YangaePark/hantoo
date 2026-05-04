@@ -252,6 +252,9 @@ class LiveTrader:
         self.seeded_previous_close: dict[str, object] = {}
         self.last_cumulative_volume: dict[tuple[str, object], int] = {}
         self._error_streak: int = 0
+        self._tone_current: str = "neutral"
+        self._tone_pending: str = "neutral"
+        self._tone_pending_count: int = 0
         self.active_symbols: list[str] = []
         self.selected_since: dict[str, float] = {}
         self.last_selection_at = 0.0
@@ -1579,7 +1582,7 @@ class LiveTrader:
                 min_atr_pct=max(self.strategy.min_atr_pct, 0.004),
                 max_trades_per_day=min(self.strategy.max_trades_per_day, 6),
             )
-            tone = self._market_tone(now, base)
+            tone = self._stable_tone(now, base)
             self._set_strategy_tone(tone)
             return self._strategy_by_tone(base, tone)
         if self.market == DOMESTIC_ETF_MARKET and self.config.mode == "live":
@@ -1605,7 +1608,7 @@ class LiveTrader:
                 max_trades_per_day=min(max(self.strategy.max_trades_per_day, 3), 5),
                 cooldown_bars=max(self.strategy.cooldown_bars, 1),
             )
-            tone = self._market_tone(now, base)
+            tone = self._stable_tone(now, base)
             self._set_strategy_tone(tone)
             return self._strategy_by_tone(base, tone)
         if self.market == DEFAULT_MARKET and self.config.mode == "live":
@@ -1625,7 +1628,7 @@ class LiveTrader:
                 max_trades_per_day=max(self.strategy.max_trades_per_day, 8),
                 cooldown_bars=min(self.strategy.cooldown_bars, 1),
             )
-            tone = self._market_tone(now, base)
+            tone = self._stable_tone(now, base)
             self._set_strategy_tone(tone)
             return self._strategy_by_tone(base, tone)
         self._set_strategy_tone("neutral")
@@ -1634,6 +1637,19 @@ class LiveTrader:
     def _set_strategy_tone(self, tone: str) -> None:
         with self.lock:
             self.status["strategy_tone"] = tone
+
+    def _stable_tone(self, now: datetime, strategy: StockScannerConfig) -> str:
+        """히스테리시스 적용 톤. raw 신호가 3사이클 연속 같아야 실제 전환한다."""
+        _TONE_SWITCH_MIN_CYCLES = 3
+        raw = self._market_tone(now, strategy)
+        if raw == self._tone_pending:
+            self._tone_pending_count += 1
+        else:
+            self._tone_pending = raw
+            self._tone_pending_count = 1
+        if self._tone_pending_count >= _TONE_SWITCH_MIN_CYCLES:
+            self._tone_current = raw
+        return self._tone_current
 
     def _market_tone(self, now: datetime, strategy: StockScannerConfig) -> str:
         if not strategy.adaptive_market_regime:

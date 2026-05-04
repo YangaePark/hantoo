@@ -170,11 +170,14 @@ function renderPnlChart(trades) {
 function setupCanvas(canvas) {
   const rect = canvas.getBoundingClientRect();
   const ratio = window.devicePixelRatio || 1;
-  canvas.width = Math.max(1, Math.floor(rect.width * ratio));
-  canvas.height = Math.max(1, Math.floor(Number(canvas.getAttribute("height") || 260) * ratio));
+  // rect.width가 0이면 부모 요소 너비로 폴백 (details 닫힌 상태 등)
+  const logicalWidth = rect.width || canvas.parentElement?.getBoundingClientRect().width || 300;
+  const logicalHeight = Number(canvas.getAttribute("height") || 260);
+  canvas.width = Math.max(1, Math.floor(logicalWidth * ratio));
+  canvas.height = Math.max(1, Math.floor(logicalHeight * ratio));
   const ctx = canvas.getContext("2d");
   ctx.scale(ratio, ratio);
-  return { ctx, width: rect.width, height: Number(canvas.getAttribute("height") || 260) };
+  return { ctx, width: logicalWidth, height: logicalHeight };
 }
 
 function drawLineChart(canvas, values, options) {
@@ -200,8 +203,16 @@ function drawLineChart(canvas, values, options) {
   ctx.lineWidth = 2;
   ctx.stroke();
 
-  ctx.lineTo(width - pad, height - pad);
-  ctx.lineTo(pad, height - pad);
+  // fill 영역은 경로를 새로 시작해 선 경로와 분리한다
+  ctx.beginPath();
+  values.forEach((value, idx) => {
+    const px = x(idx);
+    const py = y(value);
+    if (idx === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  });
+  ctx.lineTo(x(values.length - 1), height - pad);
+  ctx.lineTo(x(0), height - pad);
   ctx.closePath();
   ctx.fillStyle = options.fill;
   ctx.fill();
