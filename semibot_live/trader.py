@@ -1005,11 +1005,32 @@ class LiveTrader:
             )
             return False
         held_symbols = self._held_symbols()
-        symbols = [
-            symbol
-            for symbol in self.active_symbols
-            if symbol not in held_symbols and (fresh_symbols is None or symbol in fresh_symbols)
-        ]
+        symbols = []
+        for symbol in self.active_symbols:
+            if symbol in held_symbols:
+                continue
+            if fresh_symbols is not None and symbol not in fresh_symbols:
+                continue
+            if strategy.stop_loss_reentry_block_minutes > 0:
+                blocked_until = _live_symbol_stop_loss_reentry_block_until(
+                    self.report_dir,
+                    symbol,
+                    now.date(),
+                    strategy.stop_loss_reentry_block_minutes,
+                )
+                if blocked_until and now < blocked_until:
+                    self._set_trade_message(
+                        f"{symbol}: 손절 후 재진입 대기 ({blocked_until.strftime('%H:%M')}까지)"
+                    )
+                    self._log_decision(
+                        "entry_skip",
+                        now,
+                        symbol=symbol,
+                        reason="stop_loss_reentry_cooldown",
+                        blocked_until=blocked_until.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                    continue
+            symbols.append(symbol)
         candidates = [
             candidate
             for symbol in symbols
@@ -2126,6 +2147,13 @@ def _live_symbol_stop_loss_reentry_block_until(
             if not exited_at:
                 return None
             return exited_at + timedelta(minutes=max(1, int(block_minutes)))
+        if action.startswith("SELL") and reason == "live_trailing_stop":
+            # trailing stop 후에는 절반 시간만 차단 (수익 실현 후 재진입 기회는 남긴다)
+            exited_at = _timestamp_datetime(row.get("timestamp"))
+            if not exited_at:
+                return None
+            trailing_block = max(1, int(block_minutes) // 2)
+            return exited_at + timedelta(minutes=trailing_block)
         if action == "BUY":
             # 최근 이벤트가 BUY라면 직전 손절 블록을 이미 통과한 상태로 본다.
             return None
