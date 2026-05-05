@@ -21,19 +21,34 @@ ROOT = Path(__file__).resolve().parents[1]
 STATE_ROOT = Path(os.environ.get("SEMIBOT_STATE_ROOT", ROOT)).resolve()
 DEFAULT_MARKET = "domestic"
 OVERSEAS_MARKET = "overseas"
+NASDAQ_SURGE_MARKET = "nasdaq_surge"
+DOMESTIC_SURGE_MARKET = "domestic_surge"
 DOMESTIC_ETF_MARKET = "domestic_etf"
-SUPPORTED_MARKETS = {DEFAULT_MARKET, OVERSEAS_MARKET, DOMESTIC_ETF_MARKET}
+SUPPORTED_MARKETS = {DEFAULT_MARKET, OVERSEAS_MARKET, NASDAQ_SURGE_MARKET, DOMESTIC_SURGE_MARKET, DOMESTIC_ETF_MARKET}
 LIVE_CONFIG_PATH = STATE_ROOT / "config" / "live.local.json"
 KIS_KEYS_PATH = STATE_ROOT / "config" / "kis.local.json"
 LIVE_REPORT_DIR = STATE_ROOT / "reports" / "live_trading"
 OVERSEAS_LIVE_CONFIG_PATH = STATE_ROOT / "config" / "live.overseas.local.json"
 OVERSEAS_KIS_KEYS_PATH = STATE_ROOT / "config" / "kis.overseas.local.json"
 OVERSEAS_LIVE_REPORT_DIR = STATE_ROOT / "reports" / "live_trading_overseas"
+NASDAQ_SURGE_LIVE_CONFIG_PATH = STATE_ROOT / "config" / "live.nasdaq_surge.local.json"
+NASDAQ_SURGE_KIS_KEYS_PATH = STATE_ROOT / "config" / "kis.nasdaq_surge.local.json"
+NASDAQ_SURGE_LIVE_REPORT_DIR = STATE_ROOT / "reports" / "live_trading_nasdaq_surge"
+DOMESTIC_SURGE_LIVE_CONFIG_PATH = STATE_ROOT / "config" / "live.domestic_surge.local.json"
+DOMESTIC_SURGE_KIS_KEYS_PATH = STATE_ROOT / "config" / "kis.domestic_surge.local.json"
+DOMESTIC_SURGE_LIVE_REPORT_DIR = STATE_ROOT / "reports" / "live_trading_domestic_surge"
 DOMESTIC_ETF_LIVE_CONFIG_PATH = STATE_ROOT / "config" / "live.domestic_etf.local.json"
 DOMESTIC_ETF_KIS_KEYS_PATH = STATE_ROOT / "config" / "kis.domestic_etf.local.json"
 DOMESTIC_ETF_LIVE_REPORT_DIR = STATE_ROOT / "reports" / "live_trading_domestic_etf"
 NASDAQ_PRICE_EXCHANGE_CODE = "NAS"
 NASDAQ_ORDER_EXCHANGE_CODE = "NASD"
+NASDAQ_SURGE_MIN_TRADE_VALUE = 10_000_000.0
+NASDAQ_SURGE_PREMARKET_MIN_TRADE_VALUE = 1_000_000.0
+NASDAQ_SURGE_MIN_RECENT_TRADE_VALUE = 2_000_000.0
+NASDAQ_SURGE_PREMARKET_MIN_RECENT_TRADE_VALUE = 300_000.0
+NASDAQ_SURGE_MIN_STRENGTH = 1.3
+DOMESTIC_SURGE_MIN_RECENT_TRADE_VALUE = 1_000_000_000.0
+DOMESTIC_SURGE_MIN_STRENGTH = 1.3
 DOMESTIC_ETF_MIN_TRADE_VALUE = 1_000_000_000.0
 # 종목별 차등화된 거래대금 최소입계 (KRW). 코스피200/200은 높게, 세터 ETF는 낮게.
 DOMESTIC_ETF_TRADE_VALUE_BY_SYMBOL: dict[str, float] = {
@@ -131,9 +146,21 @@ class LiveConfig:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LiveConfig":
         market = _market(data.get("market", DEFAULT_MARKET))
-        default_clock_offset = -7 if market == OVERSEAS_MARKET else 0
-        default_seed_capital = 10_000.0 if market == OVERSEAS_MARKET else 1_000_000.0
-        currency = "USD" if market == OVERSEAS_MARKET else "KRW"
+        overseas_market = _is_overseas_market(market)
+        surge_market = _is_surge_market(market)
+        default_clock_offset = -7 if overseas_market else 0
+        default_seed_capital = 10_000.0 if overseas_market else 1_000_000.0
+        currency = "USD" if overseas_market else "KRW"
+        default_poll_interval = 5 if surge_market else DEFAULT_POLL_INTERVAL_SEC
+        min_poll_interval = 5 if surge_market else DEFAULT_POLL_INTERVAL_SEC
+        default_bar_minutes = 1 if surge_market else 5
+        default_max_positions = 1 if surge_market else 3
+        default_selection_refresh = 60 if surge_market else 300
+        min_selection_refresh = 60 if surge_market else 300
+        default_min_selection_hold = 180 if surge_market else 1800
+        min_selection_hold = 60 if surge_market else 1800
+        default_min_bars = 4 if surge_market else 20
+        default_candidate_pool = 80 if surge_market else 60
         return cls(
             market=market,
             mode=data.get("mode", "paper"),
@@ -147,14 +174,14 @@ class LiveConfig:
             seed_source=_seed_source(data.get("seed_source", "manual")),
             auto_start=_truthy(data.get("auto_start")),
             auto_select=True,
-            poll_interval_sec=max(DEFAULT_POLL_INTERVAL_SEC, int(data.get("poll_interval_sec", DEFAULT_POLL_INTERVAL_SEC))),
-            bar_minutes=int(data.get("bar_minutes", 5)),
+            poll_interval_sec=max(min_poll_interval, int(data.get("poll_interval_sec", default_poll_interval))),
+            bar_minutes=max(1, int(data.get("bar_minutes", default_bar_minutes))),
             max_symbols=max(1, min(DEFAULT_MAX_SYMBOLS, int(data.get("max_symbols", DEFAULT_MAX_SYMBOLS)))),
-            max_positions=max(1, int(data.get("max_positions", 3))),
-            selection_refresh_sec=max(300, int(data.get("selection_refresh_sec", 300))),
-            min_selection_hold_sec=max(1800, int(data.get("min_selection_hold_sec", 1800))),
-            min_bars_before_evaluate=max(1, int(data.get("min_bars_before_evaluate", 20))),
-            candidate_pool_size=int(data.get("candidate_pool_size", 60)),
+            max_positions=max(1, int(data.get("max_positions", default_max_positions))),
+            selection_refresh_sec=max(min_selection_refresh, int(data.get("selection_refresh_sec", default_selection_refresh))),
+            min_selection_hold_sec=max(min_selection_hold, int(data.get("min_selection_hold_sec", default_min_selection_hold))),
+            min_bars_before_evaluate=max(1, int(data.get("min_bars_before_evaluate", default_min_bars))),
+            candidate_pool_size=int(data.get("candidate_pool_size", default_candidate_pool)),
             clock_offset_hours=int(data.get("clock_offset_hours", default_clock_offset)),
             overseas_premarket_enabled=_truthy(data.get("overseas_premarket_enabled")),
         )
@@ -238,6 +265,7 @@ class LiveTrader:
             "session_label": "",
             "overseas_premarket_enabled": config.overseas_premarket_enabled,
             "bar_count": 0,
+            "bar_minutes": config.bar_minutes,
             "bar_ready_symbols": 0,
             "bar_min_ready": 0,
             "bar_counts": {},
@@ -365,14 +393,14 @@ class LiveTrader:
                 price_errors.append({"symbol": symbol, "error": error_text})
                 if _is_rate_limit_error(error_text):
                     # API 초당 제한이 감지되면 즉시 텀을 늘려 호출 밀도를 낮춘다.
-                    time.sleep(0.25 if self.market == OVERSEAS_MARKET else 0.15)
+                    time.sleep(0.25 if _is_overseas_market(self.market) else 0.15)
                 continue
             if parsed["price"] <= 0:
                 price_errors.append(_price_error_payload(symbol, "price<=0", parsed))
                 continue
             self._add_tick(symbol, strategy_now, parsed)
             updated_symbols.add(symbol)
-            time.sleep(0.09 if self.market == OVERSEAS_MARKET else 0.05)
+            time.sleep(0.09 if _is_overseas_market(self.market) else 0.05)
         self._evaluate(client, strategy_now, updated_symbols)
         self._error_streak = 0
         bar_status = self._bar_collection_status(strategy_now)
@@ -501,7 +529,7 @@ class LiveTrader:
                 continue
             score = self._live_candidate_score(parsed, row)
             ranked.append((score, symbol))
-            time.sleep(0.08 if self.market == OVERSEAS_MARKET else 0.04)
+            time.sleep(0.08 if _is_overseas_market(self.market) else 0.04)
         ranked.sort(reverse=True)
         fresh_selected = [symbol for _, symbol in ranked[: self.config.max_symbols]]
         if self.market == DOMESTIC_ETF_MARKET:
@@ -515,8 +543,8 @@ class LiveTrader:
         selected = self._merge_selected_symbols(fresh_selected, now_ts)
         with self.lock:
             market_label = _selector_label(self.market)
-            if self.market == OVERSEAS_MARKET and self._market_session(self._strategy_now(datetime.now())) == SESSION_PREMARKET:
-                market_label = "프리장 NASDAQ 자동선별"
+            if _is_overseas_market(self.market) and self._market_session(self._strategy_now(datetime.now())) == SESSION_PREMARKET:
+                market_label = "프리장 NASDAQ 자동선별" if self.market == OVERSEAS_MARKET else "프리장 나스닥 급등주 자동선별"
             hold_minutes = max(1, round(self.config.min_selection_hold_sec / 60))
             self.status["selector_message"] = f"{market_label} {len(selected)}종목 / 후보 {len(candidates)}종목 / 유지 {hold_minutes}분"
             self.status["active_symbols"] = selected
@@ -531,7 +559,7 @@ class LiveTrader:
         return selected
 
     def _fetch_price(self, client: KisClient, symbol: str) -> dict[str, Any]:
-        if self.market == OVERSEAS_MARKET:
+        if _is_overseas_market(self.market):
             price_data = client.inquire_overseas_price(self.config.price_exchange_code, symbol)
             parsed = parse_overseas_price_response(price_data)
             parsed["kis_response"] = _kis_response_summary(price_data)
@@ -542,14 +570,14 @@ class LiveTrader:
         return parsed
 
     def _strategy_now(self, now: datetime) -> datetime:
-        if self.market == OVERSEAS_MARKET:
+        if _is_overseas_market(self.market):
             return datetime.now(NEW_YORK_TZ).replace(tzinfo=None)
         if not self.config.clock_offset_hours:
             return now
         return now + timedelta(hours=self.config.clock_offset_hours)
 
     def _market_session(self, now: datetime) -> str:
-        if self.market != OVERSEAS_MARKET:
+        if not _is_overseas_market(self.market):
             if now.weekday() >= 5:
                 return SESSION_CLOSED
             current = now.time()
@@ -564,7 +592,7 @@ class LiveTrader:
         return SESSION_CLOSED
 
     def _reset_premarket_bars_for_regular_if_flat(self, now: datetime, session: str) -> None:
-        if self.market != OVERSEAS_MARKET or not self.config.overseas_premarket_enabled:
+        if not _is_overseas_market(self.market) or not self.config.overseas_premarket_enabled:
             return
         if session != SESSION_REGULAR or self.positions:
             return
@@ -592,6 +620,10 @@ class LiveTrader:
     def _candidate_symbols(self, client: KisClient) -> dict[str, dict[str, Any]]:
         if self.market == OVERSEAS_MARKET:
             return self._overseas_candidate_symbols(client)
+        if self.market == NASDAQ_SURGE_MARKET:
+            return self._nasdaq_surge_candidate_symbols(client)
+        if self.market == DOMESTIC_SURGE_MARKET:
+            return self._domestic_surge_candidate_symbols(client)
         if self.market == DOMESTIC_ETF_MARKET:
             return self._domestic_etf_candidate_symbols(client)
         rows = self._domestic_rank_rows(client)
@@ -622,6 +654,34 @@ class LiveTrader:
         for source, response in responses:
             rows.extend((source, row) for row in parse_rank_rows(response))
         return rows
+
+    def _domestic_surge_rank_rows(self, client: KisClient) -> list[tuple[str, dict[str, Any]]]:
+        rows: list[tuple[str, dict[str, Any]]] = []
+        responses = [
+            ("trade_value", client.volume_rank(sort_code="3", min_volume="0")),
+            ("volume_surge", client.volume_rank(sort_code="1", min_volume="0")),
+            ("gap_up", client.fluctuation_rank(min_rate="3", max_rate="15", count="50")),
+            ("strength", client.volume_power_rank()),
+        ]
+        for source, response in responses:
+            rows.extend((source, row) for row in parse_rank_rows(response))
+        return rows
+
+    def _domestic_surge_candidate_symbols(self, client: KisClient) -> dict[str, dict[str, Any]]:
+        candidates: dict[str, dict[str, Any]] = {}
+        for source, row in self._domestic_surge_rank_rows(client):
+            symbol = rank_row_symbol(row)
+            if not _valid_stock_symbol(symbol):
+                continue
+            if _excluded_name(str(row.get("hts_kor_isnm", ""))) or _excluded_domestic_warning_row(row):
+                continue
+            if symbol not in candidates:
+                candidates[symbol] = dict(row)
+                candidates[symbol]["_sources"] = [source]
+                continue
+            candidates[symbol].update({key: value for key, value in row.items() if value not in {"", None}})
+            candidates[symbol].setdefault("_sources", []).append(source)
+        return candidates
 
     def _domestic_etf_candidate_symbols(self, client: KisClient) -> dict[str, dict[str, Any]]:
         candidates: dict[str, dict[str, Any]] = {}
@@ -680,6 +740,34 @@ class LiveTrader:
                 }
         return candidates
 
+    def _nasdaq_surge_candidate_symbols(self, client: KisClient) -> dict[str, dict[str, Any]]:
+        exchange_code = NASDAQ_PRICE_EXCHANGE_CODE
+        rows: list[tuple[str, dict[str, Any]]] = []
+        responses = [
+            ("trade_value", client.overseas_trade_value_rank(exchange_code=exchange_code, price_min="5")),
+            ("volume", client.overseas_trade_volume_rank(exchange_code=exchange_code, price_min="5")),
+            ("gap_up", client.overseas_updown_rate_rank(exchange_code=exchange_code, gubn="1")),
+            ("volume_surge", client.overseas_volume_surge_rank(exchange_code=exchange_code)),
+            ("strength", client.overseas_volume_power_rank(exchange_code=exchange_code)),
+        ]
+        for source, response in responses:
+            rows.extend((source, row) for row in parse_rank_rows(response))
+
+        candidates: dict[str, dict[str, Any]] = {}
+        for source, row in rows:
+            symbol = _normalize_overseas_symbol(rank_row_symbol(row))
+            if not _valid_overseas_symbol(symbol):
+                continue
+            if _excluded_overseas_name(_row_name(row), symbol):
+                continue
+            if symbol not in candidates:
+                candidates[symbol] = dict(row)
+                candidates[symbol]["_sources"] = [source]
+                continue
+            candidates[symbol].update({key: value for key, value in row.items() if value not in {"", None}})
+            candidates[symbol].setdefault("_sources", []).append(source)
+        return candidates
+
     def _passes_live_candidate(self, parsed: dict[str, float], row: dict[str, Any]) -> bool:
         passed, _ = self._live_candidate_filter(parsed, row)
         return passed
@@ -689,7 +777,7 @@ class LiveTrader:
         price = parsed["price"]
         if price <= 0:
             return False, "price<=0"
-        if self.market == OVERSEAS_MARKET and price < OVERSEAS_MIN_PRICE:
+        if _is_overseas_market(self.market) and price < OVERSEAS_MIN_PRICE:
             return False, f"price<{OVERSEAS_MIN_PRICE}"
         setup_move = parsed["prev_rate_pct"] / 100.0
         if not (strategy.gap_min_pct <= setup_move <= strategy.gap_max_pct):
@@ -701,6 +789,36 @@ class LiveTrader:
         symbol_for_threshold = str(row.get("stck_shrn_iscd") or row.get("symb") or "").strip().upper()
         trade_value = parsed["value"] or _row_trade_value(row)
         threshold = self._trade_value_threshold(symbol_for_threshold)
+        if self.market == NASDAQ_SURGE_MARKET:
+            if day_range > strategy.max_atr_pct:
+                return False, f"range {day_range * 100:.2f}%"
+            volume_surge = _row_volume_surge(row)
+            if volume_surge < strategy.volume_factor and "volume_surge" not in sources:
+                return False, f"volume {volume_surge:.2f}x"
+            strength = _row_strength(row)
+            if strength < NASDAQ_SURGE_MIN_STRENGTH and "strength" not in sources:
+                return False, f"strength {strength * 100:.0f}<130"
+            if trade_value >= threshold or "trade_value" in sources:
+                return True, ""
+            return False, f"value {trade_value:.0f}<{threshold:.0f}"
+        if self.market == DOMESTIC_SURGE_MARKET:
+            if _excluded_domestic_warning_row(row):
+                return False, "warning_stock"
+            if day_range > strategy.max_atr_pct:
+                return False, f"range {day_range * 100:.2f}%"
+            spread_reason = _spread_reject_reason(parsed.get("spread_pct"), strategy)
+            if spread_reason:
+                return False, spread_reason
+            avg_volume = _float(row.get("avrg_vol"))
+            volume_surge = (parsed["volume"] / avg_volume) if avg_volume > 0 else _row_volume_surge(row)
+            if volume_surge < strategy.volume_factor and "volume_surge" not in sources:
+                return False, f"volume {volume_surge:.2f}x"
+            strength = _row_strength(row)
+            if strength < DOMESTIC_SURGE_MIN_STRENGTH and "strength" not in sources:
+                return False, f"strength {strength * 100:.0f}<130"
+            if trade_value >= threshold or "trade_value" in sources:
+                return True, ""
+            return False, f"value {trade_value:.0f}<{threshold:.0f}"
         if self.market == DOMESTIC_ETF_MARKET:
             if trade_value >= threshold or "trade_value" in sources:
                 return True, ""
@@ -721,7 +839,7 @@ class LiveTrader:
         avg_volume = _row_average_volume(row)
         volume_surge = (parsed["volume"] / avg_volume) if avg_volume > 0 else max(0.0, _row_volume_surge(row))
         strength = max(0.0, _row_strength(row))
-        source_bonus = _source_priority(row) * (0.35 if self.market == OVERSEAS_MARKET else 0.0)
+        source_bonus = _source_priority(row) * (0.35 if _is_overseas_market(self.market) else 0.0)
         return (math.log10(trade_value) * 1.5) + (gap * 100.0) + (day_range * 120.0) + min(volume_surge, 8.0) + strength + source_bonus
 
     def _trade_value_threshold(self, symbol: str | None = None) -> float:
@@ -729,7 +847,13 @@ class LiveTrader:
             if symbol and symbol in DOMESTIC_ETF_TRADE_VALUE_BY_SYMBOL:
                 return DOMESTIC_ETF_TRADE_VALUE_BY_SYMBOL[symbol]
             return DOMESTIC_ETF_DEFAULT_TRADE_VALUE
-        if self.market != OVERSEAS_MARKET:
+        if self.market == NASDAQ_SURGE_MARKET:
+            if self._market_session(self._strategy_now(datetime.now())) == SESSION_PREMARKET:
+                return NASDAQ_SURGE_PREMARKET_MIN_TRADE_VALUE
+            return NASDAQ_SURGE_MIN_TRADE_VALUE
+        if self.market == DOMESTIC_SURGE_MARKET:
+            return DOMESTIC_SURGE_MIN_RECENT_TRADE_VALUE
+        if not _is_overseas_market(self.market):
             return 1_000_000_000
         if self._market_session(self._strategy_now(datetime.now())) == SESSION_PREMARKET:
             return OVERSEAS_PREMARKET_MIN_TRADE_VALUE
@@ -752,6 +876,9 @@ class LiveTrader:
                     low=min(existing.low, price),
                     close=price,
                     volume=existing.volume + volume_delta,
+                    bid=parsed.get("bid") or existing.bid,
+                    ask=parsed.get("ask") or existing.ask,
+                    spread_pct=parsed.get("spread_pct") if parsed.get("spread_pct") else existing.spread_pct,
                 )
             else:
                 bar = StockBar(
@@ -762,6 +889,9 @@ class LiveTrader:
                     low=price,
                     close=price,
                     volume=volume_delta,
+                    bid=parsed.get("bid") or None,
+                    ask=parsed.get("ask") or None,
+                    spread_pct=parsed.get("spread_pct") or None,
                 )
             self.bars.append(bar)
             self.bars = self.bars[-5000:]
@@ -821,7 +951,7 @@ class LiveTrader:
         if price <= 0 or prev_rate <= -99.0:
             return
         previous_close = price / (1.0 + (prev_rate / 100.0)) if prev_rate else price
-        seed_close_time = clock_time(16, 0) if self.market == OVERSEAS_MARKET else clock_time(15, 30)
+        seed_close_time = clock_time(16, 0) if _is_overseas_market(self.market) else clock_time(15, 30)
         previous_timestamp = datetime.combine(now.date() - timedelta(days=1), seed_close_time)
         with self.lock:
             self.bars = [
@@ -848,7 +978,7 @@ class LiveTrader:
         if len(self.bars) < self.config.min_bars_before_evaluate:
             if self._try_live_direct_entry(client, now, strategy, {}, [], fresh_symbols):
                 return
-            self._set_trade_message(f"5분봉 데이터 수집 중 ({len(self.bars)}/{self.config.min_bars_before_evaluate})")
+            self._set_trade_message(f"{self.config.bar_minutes}분봉 데이터 수집 중 ({len(self.bars)}/{self.config.min_bars_before_evaluate})")
             return
         result = StockScannerBacktester(strategy).run(self.bars)
         if self.config.mode == "live" and self._try_live_direct_entry(
@@ -1216,6 +1346,8 @@ class LiveTrader:
             reason = "live_take_profit"
         elif highest_price > entry_price and latest.low <= highest_price * (1.0 - strategy.trailing_stop_pct):
             reason = "live_trailing_stop"
+        elif strategy.time_stop_minutes > 0 and _position_held_minutes(position, now) >= strategy.time_stop_minutes:
+            reason = "live_time_stop"
         if not reason:
             return False
         return self._submit_live_sell(client, now, strategy, position, latest, reason)
@@ -1413,6 +1545,25 @@ class LiveTrader:
             return None
         if latest.volume <= 0:
             return None
+        if self.market == NASDAQ_SURGE_MARKET:
+            recent_bars = current_bars[-3:]
+            if len(recent_bars) < 3:
+                return None
+            recent_value = sum(bar.value for bar in recent_bars)
+            if recent_value < self._nasdaq_surge_recent_trade_value_threshold(now):
+                return None
+        if self.market == DOMESTIC_SURGE_MARKET:
+            spread_reason = _spread_reject_reason(latest.spread_pct, strategy)
+            if spread_reason:
+                return None
+            recent_bars = current_bars[-3:]
+            if len(recent_bars) < 3:
+                return None
+            recent_value = sum(bar.value for bar in recent_bars)
+            if recent_value < DOMESTIC_SURGE_MIN_RECENT_TRADE_VALUE:
+                return None
+            if _recent_vi_proxy_blocked(current_bars, strategy):
+                return None
         # 직전 봉 고점을 넘지 못하면 모멘텀 지속 신호로 보지 않는다.
         if len(current_bars) >= 2:
             prev_bar = current_bars[-2]
@@ -1442,6 +1593,11 @@ class LiveTrader:
         breakout_bonus = 1.0 if opening_breakout else 0.0
         score = (setup_move * 100.0) + min(volume_ratio, 5.0) + breakout_bonus
         return score, latest, profile.reason
+
+    def _nasdaq_surge_recent_trade_value_threshold(self, now: datetime) -> float:
+        if self._market_session(now) == SESSION_PREMARKET:
+            return NASDAQ_SURGE_PREMARKET_MIN_RECENT_TRADE_VALUE
+        return NASDAQ_SURGE_MIN_RECENT_TRADE_VALUE
 
     def _domestic_etf_index_proxy_ok(self, now: datetime) -> bool:
         proxy_states = []
@@ -1480,6 +1636,27 @@ class LiveTrader:
         )
 
     def _direct_entry_profile(self, now: datetime, strategy: StockScannerConfig) -> DirectEntryProfile:
+        if self.market == NASDAQ_SURGE_MARKET:
+            if self._market_session(now) == SESSION_PREMARKET:
+                return DirectEntryProfile(
+                    min_bars=max(5, strategy.volume_sma + 1),
+                    min_volume_ratio=max(1.8, strategy.volume_factor),
+                    min_vwap_ratio=1.002,
+                    min_lookback_move=0.018,
+                    require_opening_breakout=True,
+                    max_setup_move=min(strategy.gap_max_pct, 0.18),
+                    max_extension_pct=min(strategy.max_extension_pct, 0.06),
+                    reason="live_nasdaq_surge_premarket_breakout_entry",
+                )
+            return DirectEntryProfile(
+                min_bars=max(4, strategy.volume_sma + 1),
+                min_volume_ratio=max(1.2, strategy.volume_factor),
+                min_vwap_ratio=1.0,
+                min_lookback_move=0.015,
+                max_setup_move=strategy.gap_max_pct,
+                max_extension_pct=strategy.max_extension_pct,
+                reason="live_nasdaq_surge_breakout_entry",
+            )
         if self.market == OVERSEAS_MARKET:
             if self._market_session(now) == SESSION_PREMARKET:
                 return DirectEntryProfile(
@@ -1511,6 +1688,16 @@ class LiveTrader:
                 max_extension_pct=strategy.max_extension_pct,
                 reason="live_domestic_etf_vwap_entry",
             )
+        if self.market == DOMESTIC_SURGE_MARKET:
+            return DirectEntryProfile(
+                min_bars=max(4, strategy.volume_sma + 1),
+                min_volume_ratio=max(1.0, strategy.volume_factor),
+                min_vwap_ratio=1.0,
+                min_lookback_move=0.02,
+                max_setup_move=strategy.gap_max_pct,
+                max_extension_pct=strategy.max_extension_pct,
+                reason="live_domestic_surge_breakout_entry",
+            )
         return DirectEntryProfile(max_extension_pct=strategy.max_extension_pct)
 
     def _set_trade_message(self, message: str) -> None:
@@ -1521,7 +1708,7 @@ class LiveTrader:
         if not self.active_symbols:
             return "자동선별 종목 없음"
         strategy = self._active_strategy(now)
-        if self.market == OVERSEAS_MARKET and self._market_session(now) == SESSION_PREMARKET:
+        if _is_overseas_market(self.market) and self._market_session(now) == SESSION_PREMARKET:
             prefix = "프리장 "
         else:
             prefix = ""
@@ -1551,6 +1738,29 @@ class LiveTrader:
         return f"{prefix}{' / '.join(messages)}"
 
     def _active_strategy(self, now: datetime) -> StockScannerConfig:
+        if self.market == NASDAQ_SURGE_MARKET:
+            if self._market_session(now) == SESSION_PREMARKET:
+                self._set_strategy_tone("premarket")
+                return replace(
+                    self.strategy,
+                    observation_minutes=max(self.strategy.observation_minutes, 10),
+                    gap_min_pct=max(self.strategy.gap_min_pct, 0.03),
+                    gap_max_pct=min(max(self.strategy.gap_max_pct, 0.18), 0.22),
+                    volume_sma=max(self.strategy.volume_sma, 4),
+                    volume_factor=max(self.strategy.volume_factor, 2.0),
+                    min_atr_pct=max(self.strategy.min_atr_pct, 0.008),
+                    max_atr_pct=min(max(self.strategy.max_atr_pct, 0.12), 0.18),
+                    max_extension_pct=min(self.strategy.max_extension_pct, 0.06),
+                    risk_per_trade_pct=min(self.strategy.risk_per_trade_pct, 0.006),
+                    max_position_pct=min(self.strategy.max_position_pct, 0.35),
+                    stop_loss_pct=max(self.strategy.stop_loss_pct, 0.02),
+                    take_profit_pct=max(self.strategy.take_profit_pct, 0.04),
+                    trailing_stop_pct=max(self.strategy.trailing_stop_pct, 0.025),
+                    daily_stop_loss_pct=min(self.strategy.daily_stop_loss_pct, 0.025),
+                    max_trades_per_day=min(self.strategy.max_trades_per_day, 3),
+                )
+            self._set_strategy_tone("neutral")
+            return self.strategy
         if self.market == OVERSEAS_MARKET and self._market_session(now) == SESSION_PREMARKET:
             self._set_strategy_tone("premarket")
             return replace(
@@ -1654,7 +1864,7 @@ class LiveTrader:
     def _market_tone(self, now: datetime, strategy: StockScannerConfig) -> str:
         if not strategy.adaptive_market_regime:
             return "neutral"
-        candidates = list(DOMESTIC_ETF_INDEX_PROXIES) if self.market != OVERSEAS_MARKET else []
+        candidates = list(DOMESTIC_ETF_INDEX_PROXIES) if not _is_overseas_market(self.market) else []
         candidates.extend(self.active_symbols)
         symbols: list[str] = []
         for symbol in candidates:
@@ -1721,7 +1931,7 @@ class LiveTrader:
             return "현재가 수집 대기"
         current_bars = [bar for bar in symbol_bars if bar.session == now.date()]
         if not current_bars:
-            return "오늘 5분봉 수집 대기"
+            return f"오늘 {self.config.bar_minutes}분봉 수집 대기"
 
         latest = current_bars[-1]
         previous_close = _previous_close_for(symbol_bars, latest)
@@ -1738,6 +1948,26 @@ class LiveTrader:
             return f"상승률 {setup_move * 100:.1f}% < {strategy.gap_min_pct * 100:.1f}%"
         if setup_move > strategy.gap_max_pct:
             return f"상승률 {setup_move * 100:.1f}% > {strategy.gap_max_pct * 100:.1f}%"
+        if self.market == NASDAQ_SURGE_MARKET:
+            recent_bars = current_bars[-3:]
+            if len(recent_bars) < 3:
+                return "최근 3분 거래대금 계산 대기"
+            recent_value = sum(bar.value for bar in recent_bars)
+            threshold = self._nasdaq_surge_recent_trade_value_threshold(now)
+            if recent_value < threshold:
+                return f"최근 3분 거래대금 ${recent_value / 1_000_000:.1f}M < ${threshold / 1_000_000:.1f}M"
+        if self.market == DOMESTIC_SURGE_MARKET:
+            spread_reason = _spread_reject_reason(latest.spread_pct, strategy)
+            if spread_reason:
+                return spread_reason
+            recent_bars = current_bars[-3:]
+            if len(recent_bars) < 3:
+                return "최근 3분 거래대금 계산 대기"
+            recent_value = sum(bar.value for bar in recent_bars)
+            if recent_value < DOMESTIC_SURGE_MIN_RECENT_TRADE_VALUE:
+                return f"최근 3분 거래대금 {recent_value / 100_000_000:.1f}억 < 10.0억"
+            if _recent_vi_proxy_blocked(current_bars, strategy):
+                return "VI 프록시 쿨다운"
 
         previous_volumes = [float(bar.volume) for bar in current_bars[:-1]]
         if len(previous_volumes) < strategy.volume_sma:
@@ -1784,7 +2014,7 @@ class LiveTrader:
             return {"rt_cd": "0", "msg1": "paper order recorded"}
         if not self.config.account_no:
             return {"rt_cd": "-1", "msg1": "account_no is required"}
-        if self.market == OVERSEAS_MARKET:
+        if _is_overseas_market(self.market):
             return client.order_overseas(
                 account_no=self.config.account_no,
                 product_code=self.config.product_code,
@@ -1801,8 +2031,8 @@ class LiveTrader:
             symbol=symbol,
             side=side,
             quantity=quantity,
-            price=0,
-            order_division="01",
+            price=max(1, int(round(price))) if self.market == DOMESTIC_SURGE_MARKET and side == "buy" else 0,
+            order_division="00" if self.market == DOMESTIC_SURGE_MARKET and side == "buy" else "01",
             live=live,
         )
 
@@ -1812,7 +2042,7 @@ class LiveTrader:
         if self.config.mode != "live" or not self.config.account_no:
             return None
         try:
-            if self.market == OVERSEAS_MARKET:
+            if _is_overseas_market(self.market):
                 response = client.inquire_overseas_balance(
                     account_no=self.config.account_no,
                     product_code=self.config.product_code,
@@ -2270,6 +2500,7 @@ def _idle_status(market: str = DEFAULT_MARKET) -> dict[str, Any]:
         "session_label": "",
         "overseas_premarket_enabled": config.overseas_premarket_enabled,
         "bar_count": 0,
+        "bar_minutes": config.bar_minutes,
         "bar_ready_symbols": 0,
         "bar_min_ready": 0,
         "bar_counts": {},
@@ -2303,6 +2534,10 @@ def _selector_label(market: str) -> str:
     market = _market(market)
     if market == OVERSEAS_MARKET:
         return "NASDAQ 자동선별"
+    if market == NASDAQ_SURGE_MARKET:
+        return "나스닥 급등주 자동선별"
+    if market == DOMESTIC_SURGE_MARKET:
+        return "국내 급등주 자동선별"
     if market == DOMESTIC_ETF_MARKET:
         return "국내ETF 자동선별"
     return "자동선별"
@@ -2322,10 +2557,22 @@ def _market(value: object) -> str:
     return market if market in SUPPORTED_MARKETS else DEFAULT_MARKET
 
 
+def _is_overseas_market(market: str) -> bool:
+    return _market(market) in {OVERSEAS_MARKET, NASDAQ_SURGE_MARKET}
+
+
+def _is_surge_market(market: str) -> bool:
+    return _market(market) in {DOMESTIC_SURGE_MARKET, NASDAQ_SURGE_MARKET}
+
+
 def _market_label(market: str) -> str:
     market = _market(market)
     if market == OVERSEAS_MARKET:
         return "해외"
+    if market == NASDAQ_SURGE_MARKET:
+        return "나스닥 급등주"
+    if market == DOMESTIC_SURGE_MARKET:
+        return "국내 급등주"
     if market == DOMESTIC_ETF_MARKET:
         return "국내ETF"
     return "국내"
@@ -2335,6 +2582,10 @@ def _strategy_name(market: str) -> str:
     market = _market(market)
     if market == OVERSEAS_MARKET:
         return "live_overseas_stock_scanner"
+    if market == NASDAQ_SURGE_MARKET:
+        return "live_nasdaq_surge_scalp"
+    if market == DOMESTIC_SURGE_MARKET:
+        return "live_domestic_surge_scalp"
     if market == DOMESTIC_ETF_MARKET:
         return "live_domestic_etf_scalp"
     return "live_volatile_stock_scanner"
@@ -2373,6 +2624,10 @@ def live_config_path(market: str = DEFAULT_MARKET) -> Path:
     market = _market(market)
     if market == OVERSEAS_MARKET:
         return OVERSEAS_LIVE_CONFIG_PATH
+    if market == NASDAQ_SURGE_MARKET:
+        return NASDAQ_SURGE_LIVE_CONFIG_PATH
+    if market == DOMESTIC_SURGE_MARKET:
+        return DOMESTIC_SURGE_LIVE_CONFIG_PATH
     if market == DOMESTIC_ETF_MARKET:
         return DOMESTIC_ETF_LIVE_CONFIG_PATH
     return LIVE_CONFIG_PATH
@@ -2382,6 +2637,10 @@ def kis_keys_path(market: str = DEFAULT_MARKET) -> Path:
     market = _market(market)
     if market == OVERSEAS_MARKET:
         return OVERSEAS_KIS_KEYS_PATH
+    if market == NASDAQ_SURGE_MARKET:
+        return NASDAQ_SURGE_KIS_KEYS_PATH
+    if market == DOMESTIC_SURGE_MARKET:
+        return DOMESTIC_SURGE_KIS_KEYS_PATH
     if market == DOMESTIC_ETF_MARKET:
         return DOMESTIC_ETF_KIS_KEYS_PATH
     return KIS_KEYS_PATH
@@ -2391,6 +2650,10 @@ def live_report_dir(market: str = DEFAULT_MARKET) -> Path:
     market = _market(market)
     if market == OVERSEAS_MARKET:
         return OVERSEAS_LIVE_REPORT_DIR
+    if market == NASDAQ_SURGE_MARKET:
+        return NASDAQ_SURGE_LIVE_REPORT_DIR
+    if market == DOMESTIC_SURGE_MARKET:
+        return DOMESTIC_SURGE_LIVE_REPORT_DIR
     if market == DOMESTIC_ETF_MARKET:
         return DOMESTIC_ETF_LIVE_REPORT_DIR
     return LIVE_REPORT_DIR
@@ -2399,6 +2662,49 @@ def live_report_dir(market: str = DEFAULT_MARKET) -> Path:
 def _excluded_name(name: str) -> bool:
     upper = name.upper()
     return any(token in upper for token in ("ETF", "ETN", "스팩", "SPAC"))
+
+
+def _excluded_domestic_warning_row(row: dict[str, Any]) -> bool:
+    name = _row_name(row).upper()
+    if any(token in name for token in ("관리종목", "투자경고", "투자위험")):
+        return True
+    warning_keys = (
+        "warning",
+        "is_warning",
+        "trht_yn",
+        "mket_warn_cls_code",
+        "mrkt_warn_cls_code",
+        "invst_warn_cls_code",
+        "invst_risk_cls_code",
+        "mngt_cls_code",
+        "mngt_yn",
+    )
+    for key in warning_keys:
+        raw = str(row.get(key, "")).strip().upper()
+        if raw and raw not in {"0", "00", "N", "NORMAL", "NONE", "FALSE"}:
+            return True
+    return False
+
+
+def _spread_reject_reason(spread_pct: Any, strategy: StockScannerConfig) -> str:
+    if spread_pct in {None, ""}:
+        return "spread_missing" if strategy.require_spread else ""
+    spread = _float(spread_pct)
+    if spread <= 0:
+        return ""
+    if spread > strategy.max_spread_pct:
+        return f"spread {spread * 100:.2f}%>{strategy.max_spread_pct * 100:.2f}%"
+    return ""
+
+
+def _recent_vi_proxy_blocked(current_bars: list[StockBar], strategy: StockScannerConfig) -> bool:
+    if strategy.vi_proxy_move_pct <= 0:
+        return False
+    lookback = max(1, strategy.vi_cooldown_bars)
+    for bar in current_bars[-lookback:]:
+        if bar.open > 0 and abs((bar.close / bar.open) - 1.0) >= strategy.vi_proxy_move_pct:
+            return True
+    return False
 
 
 def _included_domestic_etf(row: dict[str, Any], symbol: str) -> bool:
@@ -2522,6 +2828,7 @@ def _strategy_snapshot(strategy: StockScannerConfig) -> dict[str, Any]:
         "stop_loss_pct",
         "take_profit_pct",
         "trailing_stop_pct",
+        "time_stop_minutes",
         "force_exit_time",
     )
     return {key: getattr(strategy, key) for key in keys}
@@ -2531,6 +2838,15 @@ def _position_entry_date(position: dict[str, Any] | None) -> object | None:
     if not position:
         return None
     return _timestamp_date(position.get("entry_time"))
+
+
+def _position_held_minutes(position: dict[str, Any] | None, now: datetime) -> int:
+    if not position:
+        return 0
+    entered_at = _timestamp_datetime(position.get("entry_time"))
+    if not entered_at:
+        return 0
+    return max(0, int((now - entered_at).total_seconds() // 60))
 
 
 def _timestamp_date(value: Any) -> object | None:

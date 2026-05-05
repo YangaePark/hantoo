@@ -6,7 +6,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from semibot_backtester.stock_scanner import StockBar, StockScannerConfig
-from semibot_live.trader import DOMESTIC_ETF_MARKET, DEFAULT_MARKET, OVERSEAS_MARKET, LiveConfig, LiveTrader, live_report_dir
+from semibot_live.trader import (
+    DOMESTIC_ETF_MARKET,
+    DOMESTIC_SURGE_MARKET,
+    DEFAULT_MARKET,
+    NASDAQ_SURGE_MARKET,
+    OVERSEAS_MARKET,
+    LiveConfig,
+    LiveTrader,
+    live_report_dir,
+)
 
 
 class LiveConfigTests(unittest.TestCase):
@@ -113,12 +122,40 @@ class LiveConfigTests(unittest.TestCase):
     def test_overseas_report_path_is_separate(self):
         self.assertNotEqual(live_report_dir(DEFAULT_MARKET), live_report_dir(OVERSEAS_MARKET))
 
+    def test_nasdaq_surge_config_uses_fast_overseas_slot(self):
+        config = LiveConfig.from_dict({"market": "nasdaq_surge", "currency": "KRW"})
+
+        self.assertEqual(config.market, NASDAQ_SURGE_MARKET)
+        self.assertEqual(config.currency, "USD")
+        self.assertEqual(config.bar_minutes, 1)
+        self.assertEqual(config.poll_interval_sec, 5)
+        self.assertEqual(config.selection_refresh_sec, 60)
+        self.assertEqual(config.min_selection_hold_sec, 180)
+        self.assertEqual(config.min_bars_before_evaluate, 4)
+        self.assertEqual(config.max_positions, 1)
+        self.assertEqual(config.seed_capital, 10_000.0)
+        self.assertEqual(config.clock_offset_hours, -7)
+        self.assertNotEqual(live_report_dir(DEFAULT_MARKET), live_report_dir(NASDAQ_SURGE_MARKET))
+
     def test_domestic_etf_config_uses_separate_market_slot(self):
         config = LiveConfig.from_dict({"market": "domestic_etf", "currency": "USD"})
 
         self.assertEqual(config.market, DOMESTIC_ETF_MARKET)
         self.assertEqual(config.currency, "KRW")
         self.assertNotEqual(live_report_dir(DEFAULT_MARKET), live_report_dir(DOMESTIC_ETF_MARKET))
+
+    def test_domestic_surge_config_uses_fast_one_minute_slot(self):
+        config = LiveConfig.from_dict({"market": "domestic_surge", "currency": "USD"})
+
+        self.assertEqual(config.market, DOMESTIC_SURGE_MARKET)
+        self.assertEqual(config.currency, "KRW")
+        self.assertEqual(config.bar_minutes, 1)
+        self.assertEqual(config.poll_interval_sec, 5)
+        self.assertEqual(config.selection_refresh_sec, 60)
+        self.assertEqual(config.min_selection_hold_sec, 180)
+        self.assertEqual(config.min_bars_before_evaluate, 4)
+        self.assertEqual(config.max_positions, 1)
+        self.assertNotEqual(live_report_dir(DEFAULT_MARKET), live_report_dir(DOMESTIC_SURGE_MARKET))
 
     def test_entry_wait_message_explains_force_exit_time(self):
         strategy = StockScannerConfig()
@@ -317,6 +354,16 @@ class LiveConfigTests(unittest.TestCase):
         self.assertIn("AAPL", candidates)
         self.assertIn("fallback", candidates["AAPL"]["_sources"])
 
+    def test_nasdaq_surge_selector_uses_nasdaq_rankings(self):
+        config = LiveConfig.from_dict({"market": "nasdaq_surge", "max_symbols": 2, "candidate_pool_size": 10})
+        strategy = StockScannerConfig(gap_min_pct=0.04, gap_max_pct=0.18, volume_factor=1.4, min_atr_pct=0.002, max_atr_pct=0.18)
+        trader = LiveTrader(config, strategy)
+
+        selected = trader._select_symbols(FakeNasdaqSurgeRankClient())
+
+        self.assertEqual(selected, ["IREN"])
+        self.assertIn("나스닥 급등주 자동선별", trader.status["selector_message"])
+
     def test_domestic_etf_candidates_include_one_x_etfs_only(self):
         config = LiveConfig.from_dict({"market": "domestic_etf"})
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -329,6 +376,96 @@ class LiveConfigTests(unittest.TestCase):
             self.assertNotIn("005930", candidates)
             self.assertNotIn("122630", candidates)
             self.assertIn("etf_universe", candidates["069500"]["_sources"])
+
+    def test_domestic_surge_selector_uses_strength_and_excludes_warning_rows(self):
+        config = LiveConfig.from_dict({"market": "domestic_surge", "max_symbols": 2, "candidate_pool_size": 10})
+        strategy = StockScannerConfig(gap_min_pct=0.03, gap_max_pct=0.12, volume_factor=1.2, min_atr_pct=0.002, max_atr_pct=0.12)
+        trader = LiveTrader(config, strategy)
+
+        selected = trader._select_symbols(FakeDomesticSurgeRankClient())
+
+        self.assertEqual(selected, ["005930"])
+        self.assertIn("국내 급등주 자동선별", trader.status["selector_message"])
+
+    def test_domestic_surge_direct_entry_uses_limit_buy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = LiveConfig.from_dict({"market": "domestic_surge", "mode": "live", "account_no": "12345678"})
+            strategy = StockScannerConfig(
+                initial_capital=1_000_000,
+                entry_start_time="09:05",
+                entry_cutoff_time="14:50",
+                observation_minutes=1,
+                gap_min_pct=0.03,
+                gap_max_pct=0.12,
+                volume_sma=2,
+                volume_factor=1.2,
+                min_atr_pct=0.0,
+                max_atr_pct=0.12,
+                max_extension_pct=0.05,
+                stop_loss_pct=0.02,
+                take_profit_pct=0.03,
+                time_stop_minutes=15,
+            )
+            trader = LiveTrader(config, strategy, report_dir=Path(tmpdir))
+            start = datetime(2026, 4, 30, 9, 5)
+            trader.active_symbols = ["005930"]
+            trader.cash = 1_000_000
+            trader.bars = [
+                StockBar("005930", start - timedelta(days=1), 1000.0, 1000.0, 1000.0, 1000.0, 1),
+                StockBar("005930", start, 1030.0, 1035.0, 1025.0, 1030.0, 300000),
+                StockBar("005930", start + timedelta(minutes=1), 1030.0, 1045.0, 1028.0, 1040.0, 320000),
+                StockBar("005930", start + timedelta(minutes=2), 1040.0, 1055.0, 1038.0, 1050.0, 330000),
+                StockBar("005930", start + timedelta(minutes=3), 1050.0, 1065.0, 1048.0, 1060.0, 450000),
+            ]
+            client = FakeDomesticOrderClient()
+
+            entered = trader._try_live_direct_entry(client, start + timedelta(minutes=4), strategy, {}, [])
+
+            self.assertTrue(entered)
+            self.assertEqual(client.orders[0]["symbol"], "005930")
+            self.assertEqual(client.orders[0]["order_division"], "00")
+            self.assertEqual(client.orders[0]["price"], 1060)
+            self.assertIn("live_domestic_surge_breakout_entry", trader.snapshot()["trade_message"])
+
+    def test_nasdaq_surge_direct_entry_uses_overseas_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = LiveConfig.from_dict({"market": "nasdaq_surge", "mode": "live", "account_no": "12345678"})
+            strategy = StockScannerConfig(
+                initial_capital=10_000,
+                entry_start_time="09:35",
+                entry_cutoff_time="15:30",
+                observation_minutes=3,
+                gap_min_pct=0.04,
+                gap_max_pct=0.18,
+                volume_sma=2,
+                volume_factor=1.2,
+                min_atr_pct=0.0,
+                max_atr_pct=0.18,
+                max_extension_pct=0.08,
+                stop_loss_pct=0.02,
+                take_profit_pct=0.04,
+                time_stop_minutes=20,
+            )
+            trader = LiveTrader(config, strategy, report_dir=Path(tmpdir))
+            start = datetime(2026, 4, 30, 9, 35)
+            trader.active_symbols = ["IREN"]
+            trader.cash = 10_000
+            trader.bars = [
+                StockBar("IREN", start - timedelta(days=1), 10.0, 10.0, 10.0, 10.0, 1),
+                StockBar("IREN", start, 10.3, 10.45, 10.2, 10.4, 100000),
+                StockBar("IREN", start + timedelta(minutes=1), 10.4, 10.65, 10.35, 10.55, 120000),
+                StockBar("IREN", start + timedelta(minutes=2), 10.55, 10.8, 10.5, 10.75, 130000),
+                StockBar("IREN", start + timedelta(minutes=3), 10.75, 11.0, 10.7, 10.95, 140000),
+                StockBar("IREN", start + timedelta(minutes=4), 10.95, 11.3, 10.9, 11.2, 260000),
+            ]
+            client = FakeOverseasOrderClient()
+
+            entered = trader._try_live_direct_entry(client, start + timedelta(minutes=5), strategy, {}, [])
+
+            self.assertTrue(entered)
+            self.assertEqual(client.orders[0]["symbol"], "IREN")
+            self.assertEqual(client.orders[0]["exchange_code"], "NASD")
+            self.assertIn("live_nasdaq_surge_breakout_entry", trader.snapshot()["trade_message"])
 
     def test_domestic_etf_direct_entry_uses_vwap_profile(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -709,6 +846,33 @@ class LiveConfigTests(unittest.TestCase):
             self.assertEqual(len(trader.positions), 1)
             self.assertEqual(trader.positions[0]["symbol"], "000660")
 
+    def test_live_direct_exit_uses_time_stop(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = replace(StockScannerConfig(), initial_capital=1_000_000, stop_loss_pct=0.02, take_profit_pct=0.03, time_stop_minutes=15)
+            trader = LiveTrader(
+                LiveConfig.from_dict({"market": "domestic_surge", "mode": "live", "account_no": "12345678"}),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            start = datetime(2026, 4, 30, 9, 30)
+            now = start + timedelta(minutes=16)
+            trader.position = {
+                "symbol": "005930",
+                "shares": 10,
+                "entry_price": 100.0,
+                "highest_price": 100.0,
+                "entry_time": start.isoformat(sep=" "),
+            }
+            trader.bars = [StockBar("005930", now, 100.4, 100.8, 100.2, 100.5, 1000)]
+            client = FakeDomesticOrderClient()
+
+            sold = trader._try_live_direct_exit(client, now, strategy, {"005930"})
+
+            self.assertTrue(sold)
+            self.assertEqual(client.orders[0]["side"], "sell")
+            self.assertIsNone(trader.position)
+            self.assertIn("live_time_stop", trader.snapshot()["trade_message"])
+
     def test_domestic_run_cycle_force_exits_position_after_selection_drops_it(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             strategy = StockScannerConfig(initial_capital=1_000_000, force_exit_time="15:15")
@@ -931,6 +1095,51 @@ class FakeOverseasRankClient:
         return {"output": prices[symbol]}
 
 
+class FakeNasdaqSurgeRankClient:
+    def overseas_trade_value_rank(self, **kwargs):
+        return {
+            "output2": [
+                {"symb": "IREN", "name": "Iris Energy", "tamt": "180000000"},
+                {"symb": "QQQ", "name": "Invesco QQQ Trust", "tamt": "9000000000"},
+            ]
+        }
+
+    def overseas_trade_volume_rank(self, **kwargs):
+        return {"output2": [{"symb": "IREN"}, {"symb": "QQQ"}]}
+
+    def overseas_updown_rate_rank(self, **kwargs):
+        return {"output2": [{"symb": "IREN"}, {"symb": "QQQ"}]}
+
+    def overseas_volume_surge_rank(self, **kwargs):
+        return {"output2": [{"symb": "IREN", "vol_inrt": "220"}]}
+
+    def overseas_volume_power_rank(self, **kwargs):
+        return {"output2": [{"symb": "IREN", "powr": "160"}]}
+
+    def inquire_overseas_price(self, exchange_code, symbol):
+        prices = {
+            "IREN": {
+                "last": "12.00",
+                "open": "11.40",
+                "high": "12.35",
+                "low": "11.25",
+                "tvol": "16000000",
+                "tamt": "190000000",
+                "base": "11.20",
+            },
+            "QQQ": {
+                "last": "430.00",
+                "open": "429.00",
+                "high": "431.00",
+                "low": "428.00",
+                "tvol": "20000000",
+                "tamt": "8500000000",
+                "base": "428.00",
+            },
+        }
+        return {"output": prices[symbol]}
+
+
 class WeakOverseasRankClient(FakeOverseasRankClient):
     def inquire_overseas_price(self, exchange_code, symbol):
         return {
@@ -986,6 +1195,40 @@ class FakeDomesticEtfRankClient:
 
     def volume_power_rank(self):
         return {"output": []}
+
+
+class FakeDomesticSurgeRankClient:
+    def volume_rank(self, **kwargs):
+        if kwargs.get("sort_code") == "3":
+            return {
+                "output": [
+                    {"stck_shrn_iscd": "005930", "hts_kor_isnm": "삼성전자", "acml_tr_pbmn": "2000000000"},
+                    {"stck_shrn_iscd": "122630", "hts_kor_isnm": "KODEX 레버리지", "acml_tr_pbmn": "9000000000"},
+                    {"stck_shrn_iscd": "000660", "hts_kor_isnm": "SK하이닉스", "mngt_yn": "Y", "acml_tr_pbmn": "3000000000"},
+                ]
+            }
+        return {"output": [{"stck_shrn_iscd": "005930", "hts_kor_isnm": "삼성전자", "vol_inrt": "160"}]}
+
+    def fluctuation_rank(self, **kwargs):
+        return {"output": [{"stck_shrn_iscd": "005930", "hts_kor_isnm": "삼성전자"}]}
+
+    def volume_power_rank(self):
+        return {"output": [{"stck_shrn_iscd": "005930", "hts_kor_isnm": "삼성전자", "tday_rltv": "150"}]}
+
+    def inquire_price(self, symbol):
+        return {
+            "output": {
+                "stck_prpr": "106000",
+                "stck_oprc": "103000",
+                "stck_hgpr": "108000",
+                "stck_lwpr": "100000",
+                "acml_vol": "2000000",
+                "acml_tr_pbmn": "210000000000",
+                "prdy_ctrt": "6.0",
+                "bidp1": "105900",
+                "askp1": "106000",
+            }
+        }
 
 
 class FakeDomesticOrderClient:

@@ -102,6 +102,29 @@ class KisTokenTests(unittest.TestCase):
         self.assertEqual(parsed["total_evaluation"], 1_416_000)
         self.assertEqual(parsed["holdings"][0]["symbol"], "005930")
 
+    def test_domestic_price_response_parses_spread(self):
+        from semibot_live.kis import parse_price_response
+
+        parsed = parse_price_response(
+            {
+                "output": {
+                    "stck_prpr": "70000",
+                    "stck_oprc": "69000",
+                    "stck_hgpr": "70500",
+                    "stck_lwpr": "68800",
+                    "acml_vol": "1000000",
+                    "acml_tr_pbmn": "70000000000",
+                    "prdy_ctrt": "3.5",
+                    "bidp1": "69900",
+                    "askp1": "70000",
+                }
+            }
+        )
+
+        self.assertEqual(parsed["bid"], 69900)
+        self.assertEqual(parsed["ask"], 70000)
+        self.assertGreater(parsed["spread_pct"], 0)
+
     def test_overseas_price_response_is_parsed(self):
         from semibot_live.kis import parse_overseas_price_response
 

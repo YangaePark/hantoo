@@ -483,6 +483,12 @@ def parse_price_response(data: dict[str, Any]) -> dict[str, float]:
     volume = _float(output.get("acml_vol"))
     value = _float(output.get("acml_tr_pbmn"))
     prev_rate = _float(output.get("prdy_ctrt"))
+    bid = _first_float(output, ("bidp1", "bidp", "buy_bidp", "best_bidp"))
+    ask = _first_float(output, ("askp1", "askp", "sell_askp", "best_askp"))
+    spread = 0.0
+    if bid > 0 and ask > 0:
+        mid = (bid + ask) / 2.0
+        spread = ((ask - bid) / mid) if mid else 0.0
     return {
         "price": price,
         "open": open_price,
@@ -491,6 +497,9 @@ def parse_price_response(data: dict[str, Any]) -> dict[str, float]:
         "volume": volume,
         "value": value,
         "prev_rate_pct": prev_rate,
+        "bid": bid,
+        "ask": ask,
+        "spread_pct": spread,
     }
 
 

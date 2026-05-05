@@ -14,6 +14,8 @@ const $ = (id) => document.getElementById(id);
 const markets = {
   domestic: { label: "국내", report: "live_trading", currency: "KRW" },
   overseas: { label: "해외", report: "live_trading_overseas", currency: "USD" },
+  nasdaq_surge: { label: "나스닥 급등주", report: "live_trading_nasdaq_surge", currency: "USD" },
+  domestic_surge: { label: "국내 급등주", report: "live_trading_domestic_surge", currency: "KRW" },
   domestic_etf: { label: "국내ETF", report: "live_trading_domestic_etf", currency: "KRW" },
 };
 
@@ -86,7 +88,8 @@ async function loadReport(name) {
 function renderReport(report) {
   const metrics = report.metrics || {};
   const current = report.current || {};
-  const currency = report.name === markets.overseas.report ? marketCurrency("overseas") : "KRW";
+  const reportMarket = Object.keys(markets).find((market) => markets[market].report === report.name);
+  const currency = reportMarket ? marketCurrency(reportMarket) : "KRW";
   $("reportTitle").textContent = report.label || report.name;
   $("metricEquity").textContent = money(metrics.final_equity, currency);
   $("metricReturn").innerHTML = pct(metrics.total_return_pct);
@@ -172,7 +175,7 @@ function setupCanvas(canvas) {
   const ratio = window.devicePixelRatio || 1;
   // rect.width가 0이면 부모 요소 너비로 폴백 (details 닫힌 상태 등)
   const logicalWidth = rect.width || canvas.parentElement?.getBoundingClientRect().width || 300;
-  const logicalHeight = Number(canvas.getAttribute("height") || 260);
+  const logicalHeight = rect.height || Number(canvas.getAttribute("height") || 260);
   canvas.width = Math.max(1, Math.floor(logicalWidth * ratio));
   canvas.height = Math.max(1, Math.floor(logicalHeight * ratio));
   const ctx = canvas.getContext("2d");
@@ -340,6 +343,10 @@ async function saveLiveConfig(confirmAutoStart = true) {
   const seedText = config.seed_source === "balance_max" ? `잔고 최대 사용 (${marketMoney(config.seed_capital)} 예비값)` : marketMoney(config.seed_capital);
   const target = state.activeMarket === "overseas"
     ? `${config.overseas_premarket_enabled ? "프리장 포함 " : ""}NASDAQ 자동선별`
+    : state.activeMarket === "nasdaq_surge"
+      ? `${config.overseas_premarket_enabled ? "프리장 포함 " : ""}나스닥 급등주 자동선별`
+    : state.activeMarket === "domestic_surge"
+      ? "급등주 자동선별"
     : state.activeMarket === "domestic_etf"
       ? "1배 ETF 자동선별"
     : "시장 자동선별";
@@ -354,6 +361,7 @@ async function loadLiveStatus() {
   const positions = Array.isArray(status.positions) ? status.positions : (position.symbol ? [position] : []);
   const activeSymbols = status.active_symbols || [];
   const maxPositions = Number(status.max_positions || $("maxPositions").value || 3);
+  const barMinutes = Number(status.bar_minutes || 5);
   const pieces = [
     `${marketLabel()} ${status.running ? "실행 중" : "대기 중"}`,
     `모드: ${status.mode || $("liveMode").value || "paper"}`,
@@ -362,7 +370,7 @@ async function loadLiveStatus() {
     `선별: ${status.selector_message || status.selector || "-"}`,
     `추적: ${activeSymbols.length}종목`,
     `동시보유: ${positions.length}/${maxPositions}종목`,
-    `5분봉: ${Number(status.bar_count || 0).toLocaleString("ko-KR")}개`,
+    `${barMinutes}분봉: ${Number(status.bar_count || 0).toLocaleString("ko-KR")}개`,
     `주문기록: ${Number(status.orders || 0).toLocaleString("ko-KR")}건`,
   ];
   if (status.bar_min_ready) {
@@ -554,7 +562,7 @@ function renderBalance(data) {
     clearBalanceValues();
     return;
   }
-  const suffix = state.activeMarket === "overseas" ? ` / ${data.exchange_code || "-"} ${data.currency || marketCurrency()}` : "";
+  const suffix = isOverseasMarket() ? ` / ${data.exchange_code || "-"} ${data.currency || marketCurrency()}` : "";
   $("balanceStatus").textContent = `${data.account_no_masked || "-"}-${data.product_code || "01"}${suffix} / ${data.fetched_at || ""}`;
   $("balanceCash").textContent = marketMoney(data.cash);
   $("balanceWithdrawable").textContent = marketMoney(data.withdrawable_cash);
@@ -595,7 +603,7 @@ function marketLabel() {
 }
 
 function marketCurrency(market = state.activeMarket) {
-  if (market === "overseas") return markets.overseas.currency;
+  if (market === "overseas" || market === "nasdaq_surge") return "USD";
   return "KRW";
 }
 
@@ -619,12 +627,22 @@ function setupMobilePanels() {
 }
 
 function renderMarketFields() {
-  const overseas = state.activeMarket === "overseas";
+  const overseas = isOverseasMarket();
   document.querySelectorAll(".overseas-only").forEach((element) => {
     element.hidden = !overseas;
   });
-  $("balanceTitle").textContent = overseas ? "해외계좌 잔고" : state.activeMarket === "domestic_etf" ? "국내ETF 계좌 잔고" : "실계좌 잔고";
+  $("balanceTitle").textContent = overseas
+    ? state.activeMarket === "nasdaq_surge" ? "나스닥 급등주 계좌 잔고" : "해외계좌 잔고"
+    : state.activeMarket === "domestic_surge"
+      ? "국내 급등주 계좌 잔고"
+      : state.activeMarket === "domestic_etf"
+        ? "국내ETF 계좌 잔고"
+        : "실계좌 잔고";
   $("startLiveButton").textContent = `${marketLabel()} 자동매매 시작`;
+}
+
+function isOverseasMarket(market = state.activeMarket) {
+  return market === "overseas" || market === "nasdaq_surge";
 }
 
 async function switchMarket(market) {

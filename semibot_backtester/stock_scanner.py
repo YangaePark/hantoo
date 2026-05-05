@@ -38,6 +38,7 @@ class StockScannerConfig:
     partial_take_profit_pct: float = 0.0
     partial_sell_ratio: float = 0.5
     trailing_stop_pct: float = 0.012
+    time_stop_minutes: int = 0
     daily_take_profit_pct: float = 0.0
     daily_stop_loss_pct: float = 0.035
     loss_cooldown_trades: int = 0
@@ -239,6 +240,9 @@ class StockScannerBacktester:
                     symbol_bars = by_symbol[position_symbol]
                     signal_idx = _bar_index_before_time(symbol_bars, timestamp)
                     holding_bars = 0 if entry_index is None else time_idx - entry_index
+                    holding_minutes = 0
+                    if entry_index is not None:
+                        holding_minutes = max(0, int((timestamp - ordered_times[entry_index]).total_seconds() // 60))
                     if timestamp.time() >= self.config.force_exit_clock:
                         exit_reason = "force_exit"
                     elif signal_idx is not None:
@@ -259,7 +263,7 @@ class StockScannerBacktester:
                             traded = True
                             exit_reason = None
                         else:
-                            exit_reason = self._exit_reason(signal_bar, avg_cost, highest_close, holding_bars)
+                            exit_reason = self._exit_reason(signal_bar, avg_cost, highest_close, holding_bars, holding_minutes)
                     else:
                         exit_reason = None
                     if exit_reason:
@@ -421,7 +425,14 @@ class StockScannerBacktester:
             and closes[-1] > closes[max(0, len(closes) - 4)]
         )
 
-    def _exit_reason(self, bar: StockBar, avg_cost: float, highest_close: float, holding_bars: int) -> Optional[str]:
+    def _exit_reason(
+        self,
+        bar: StockBar,
+        avg_cost: float,
+        highest_close: float,
+        holding_bars: int,
+        holding_minutes: int = 0,
+    ) -> Optional[str]:
         if bar.timestamp.time() >= self.config.force_exit_clock:
             return "force_exit"
         if bar.close <= avg_cost * (1.0 - self.config.stop_loss_pct):
@@ -431,6 +442,8 @@ class StockScannerBacktester:
         if holding_bars >= self.config.min_hold_bars and highest_close > 0:
             if bar.close <= highest_close * (1.0 - self.config.trailing_stop_pct):
                 return "trailing_stop"
+        if self.config.time_stop_minutes > 0 and holding_minutes >= self.config.time_stop_minutes:
+            return "time_stop"
         return None
 
     def _buy(self, bar: StockBar, cash: float, trades: list[ScannerTrade], reason: str) -> tuple[int, float, float]:
