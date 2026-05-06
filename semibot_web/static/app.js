@@ -2,12 +2,14 @@ const state = {
   reports: [],
   current: null,
   liveTimer: null,
+  reportTimer: null,
   balanceTimer: null,
   balanceLoading: false,
   activeMarket: "domestic",
 };
 
 const BALANCE_REFRESH_MS = 60_000;
+const REPORT_REFRESH_MS = 15_000;
 const MOBILE_QUERY = "(max-width: 760px)";
 
 const $ = (id) => document.getElementById(id);
@@ -88,11 +90,16 @@ async function loadReport(name) {
 function renderReport(report) {
   const metrics = report.metrics || {};
   const current = report.current || {};
+  const daily = report.daily_summary || {};
   const reportMarket = Object.keys(markets).find((market) => markets[market].report === report.name);
   const currency = reportMarket ? marketCurrency(reportMarket) : "KRW";
   $("reportTitle").textContent = report.label || report.name;
   $("metricEquity").textContent = money(metrics.final_equity, currency);
   $("metricReturn").innerHTML = pct(metrics.total_return_pct);
+  $("metricEntryLimit").textContent = entryLimitText(daily);
+  $("metricDailyPnl").textContent = signedMoney(daily.pnl_amount, currency);
+  $("metricDailyPnl").className = Number(daily.pnl_amount || 0) >= 0 ? "good" : "bad";
+  $("metricDailyReturn").innerHTML = pct(daily.return_pct);
   $("metricDrawdown").innerHTML = pct(metrics.max_drawdown_pct);
   $("metricTrades").textContent = number(metrics.trades);
   $("metricWinRate").innerHTML = pct(metrics.sell_win_rate_pct);
@@ -106,7 +113,15 @@ function renderReport(report) {
   renderTrades(report.trades || []);
   renderEquityChart(report.equity_curve || []);
   renderPnlChart(report.trades || []);
+  renderDailyPnlChart(report.daily_pnl || []);
   renderToneSummary(report.tone_summary || {});
+}
+
+function entryLimitText(daily) {
+  const limit = Number(daily.entry_limit || 0);
+  if (!limit) return "-";
+  const remaining = Math.max(0, Number(daily.entry_remaining || 0));
+  return `${remaining.toLocaleString("ko-KR")} / ${limit.toLocaleString("ko-KR")}회`;
 }
 
 function toneLabel(tone) {
@@ -168,6 +183,12 @@ function renderPnlChart(trades) {
   const sells = trades.filter((trade) => String(trade.action || "").startsWith("SELL"));
   const values = sells.map((trade) => Number(trade.realized_pnl || 0));
   drawBarChart($("pnlChart"), values);
+}
+
+function renderDailyPnlChart(days) {
+  const values = days.map((day) => Number(day.pnl_amount || 0));
+  $("dailyPnlRange").textContent = days.length ? `${days[0].date} ~ ${days[days.length - 1].date}` : "";
+  drawBarChart($("dailyPnlChart"), values);
 }
 
 function setupCanvas(canvas) {
@@ -362,6 +383,7 @@ async function loadLiveStatus() {
   const activeSymbols = status.active_symbols || [];
   const maxPositions = Number(status.max_positions || $("maxPositions").value || 3);
   const barMinutes = Number(status.bar_minutes || 5);
+  const daily = status.daily_summary || {};
   const pieces = [
     `${marketLabel()} ${status.running ? "실행 중" : "대기 중"}`,
     `모드: ${status.mode || $("liveMode").value || "paper"}`,
@@ -370,9 +392,11 @@ async function loadLiveStatus() {
     `선별: ${status.selector_message || status.selector || "-"}`,
     `추적: ${activeSymbols.length}종목`,
     `동시보유: ${positions.length}/${maxPositions}종목`,
+    daily.entry_limit ? `진입: ${entryLimitText(daily)}` : "",
+    daily.date ? `일일손익: ${signedMoney(daily.pnl_amount, marketCurrency())} (${Number(daily.return_pct || 0).toFixed(2)}%)` : "",
     `${barMinutes}분봉: ${Number(status.bar_count || 0).toLocaleString("ko-KR")}개`,
     `주문기록: ${Number(status.orders || 0).toLocaleString("ko-KR")}건`,
-  ];
+  ].filter(Boolean);
   if (status.bar_min_ready) {
     pieces.push(`봉준비: ${Number(status.bar_ready_symbols || 0).toLocaleString("ko-KR")}/${activeSymbols.length}종목(${status.bar_min_ready}봉)`);
   }
@@ -411,6 +435,12 @@ async function loadDecisionHistory() {
   const data = await getJSON(`${apiPath("/api/live/decisions")}&limit=80`, { cache: "no-store" });
   renderDecisionHistory(data.decisions || []);
   return data;
+}
+
+async function refreshSelectedReport() {
+  const select = $("reportSelect");
+  if (!select.value) return null;
+  return loadReport(select.value);
 }
 
 function renderDecisionHistory(decisions) {
@@ -706,6 +736,10 @@ Promise.all([loadReports(), loadKeyStatus(), loadLiveConfig(), loadLiveStatus(),
 state.liveTimer = window.setInterval(() => {
   Promise.all([loadLiveStatus(), loadDecisionHistory()]).catch((error) => console.error(error));
 }, 5000);
+
+state.reportTimer = window.setInterval(() => {
+  refreshSelectedReport().catch((error) => console.error(error));
+}, REPORT_REFRESH_MS);
 
 state.balanceTimer = window.setInterval(() => {
   refreshBalance({ silent: true }).catch((error) => console.error(error));

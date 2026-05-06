@@ -20,6 +20,16 @@ class FakeKisClient(KisClient):
         return self.access_token
 
 
+class RecordingKisClient(KisClient):
+    def __init__(self):
+        super().__init__(KisCredentials(app_key="key", app_secret="secret"))
+        self.requests = []
+
+    def _request(self, method, path, *, body=None, tr_id=None, auth=True, hash_body=False):
+        self.requests.append({"method": method, "path": path, "body": body, "tr_id": tr_id})
+        return {"rt_cd": "0", "msg1": "ok"}
+
+
 class KisTokenTests(unittest.TestCase):
     def test_expiring_token_refreshes_and_persists(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -145,6 +155,22 @@ class KisTokenTests(unittest.TestCase):
         self.assertEqual(parsed["price"], 171.25)
         self.assertEqual(parsed["open"], 170.0)
         self.assertGreater(parsed["prev_rate_pct"], 0)
+
+    def test_nasdaq_order_price_is_limited_to_two_decimals(self):
+        client = RecordingKisClient()
+
+        client.order_overseas(
+            account_no="12345678",
+            product_code="01",
+            exchange_code="NASD",
+            symbol="TEAM",
+            side="buy",
+            quantity=2,
+            price=95.1277,
+            live=True,
+        )
+
+        self.assertEqual(client.requests[0]["body"]["OVRS_ORD_UNPR"], "95.13")
 
     def test_overseas_balance_response_is_parsed(self):
         from semibot_live.kis import parse_overseas_balance_response

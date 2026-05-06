@@ -134,6 +134,9 @@
       <section class="metric-grid">
         <article><span>최종 평가금</span><strong id="metricEquity">-</strong></article>
         <article><span>수익률</span><strong id="metricReturn">-</strong></article>
+        <article><span>남은 진입</span><strong id="metricEntryLimit">-</strong></article>
+        <article><span>일일 수익금액</span><strong id="metricDailyPnl">-</strong></article>
+        <article><span>일일 수익률</span><strong id="metricDailyReturn">-</strong></article>
         <article><span>최대낙폭</span><strong id="metricDrawdown">-</strong></article>
         <article><span>거래횟수</span><strong id="metricTrades">-</strong></article>
         <article><span>승률</span><strong id="metricWinRate">-</strong></article>
@@ -154,6 +157,13 @@
             <span>매도 거래 기준</span>
           </div>
           <canvas id="pnlChart" height="260"></canvas>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <h2>일별 수익금액</h2>
+            <span id="dailyPnlRange"></span>
+          </div>
+          <canvas id="dailyPnlChart" height="260"></canvas>
         </article>
       </section>
 

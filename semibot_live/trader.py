@@ -116,6 +116,13 @@ DOMESTIC_ETF_INDEX_PROXIES = ("069500", "102110", "229200", "232080")
 SESSION_PREMARKET = "premarket"
 SESSION_REGULAR = "regular"
 SESSION_CLOSED = "closed"
+TONE_MIN_HOLD_SECONDS = 10 * 60
+TONE_AGGRESSIVE_CONFIRM_SECONDS = 10 * 60
+TONE_CONSERVATIVE_CONFIRM_SECONDS = 4 * 60
+TONE_NEUTRAL_CONFIRM_SECONDS = 6 * 60
+TONE_URGENT_STOP_RATIO = 0.75
+TONE_EXTREME_WEAK_MOVE = -0.006
+TONE_EXTREME_WEAK_BREADTH = 0.25
 
 
 @dataclass
@@ -225,6 +232,14 @@ class DirectEntryProfile:
     reason: str = "live_momentum_entry"
 
 
+@dataclass(frozen=True)
+class MarketToneSignal:
+    tone: str = "neutral"
+    avg_move: float = 0.0
+    breadth: float = 0.0
+    sample_count: int = 0
+
+
 class LiveTrader:
     def __init__(
         self,
@@ -281,7 +296,9 @@ class LiveTrader:
         self.last_cumulative_volume: dict[tuple[str, object], int] = {}
         self._error_streak: int = 0
         self._tone_current: str = "neutral"
+        self._tone_current_since: datetime | None = None
         self._tone_pending: str = "neutral"
+        self._tone_pending_since: datetime | None = None
         self._tone_pending_count: int = 0
         self.active_symbols: list[str] = []
         self.selected_since: dict[str, float] = {}
@@ -378,8 +395,9 @@ class LiveTrader:
             return
         self._reset_premarket_bars_for_regular_if_flat(strategy_now, session)
 
-        should_select = not self.active_symbols or (
-            self.config.auto_select and time.time() - self.last_selection_at >= self.config.selection_refresh_sec
+        selection_elapsed = time.time() - self.last_selection_at if self.last_selection_at else float("inf")
+        should_select = (not self.active_symbols) if self.last_selection_at <= 0 else (
+            self.config.auto_select and selection_elapsed >= self.config.selection_refresh_sec
         )
         if should_select:
             self.active_symbols = self._select_symbols(client)
@@ -402,6 +420,8 @@ class LiveTrader:
             updated_symbols.add(symbol)
             time.sleep(0.09 if _is_overseas_market(self.market) else 0.05)
         self._evaluate(client, strategy_now, updated_symbols)
+        if self.config.mode == "live":
+            self._write_live_state_report(strategy_now)
         self._error_streak = 0
         bar_status = self._bar_collection_status(strategy_now)
         self._log_decision(
@@ -782,15 +802,16 @@ class LiveTrader:
         setup_move = parsed["prev_rate_pct"] / 100.0
         if not (strategy.gap_min_pct <= setup_move <= strategy.gap_max_pct):
             return False, f"setup_move {setup_move * 100:.2f}%"
-        day_range = ((parsed["high"] - parsed["low"]) / price) if price else 0.0
-        if day_range < strategy.min_atr_pct:
+        range_available = parsed["high"] > 0 and parsed["low"] > 0 and parsed["high"] > parsed["low"]
+        day_range = ((parsed["high"] - parsed["low"]) / price) if price and range_available else 0.0
+        if day_range < strategy.min_atr_pct and (range_available or not _is_overseas_market(self.market)):
             return False, f"range {day_range * 100:.2f}%"
         sources = set(row.get("_sources", []))
         symbol_for_threshold = str(row.get("stck_shrn_iscd") or row.get("symb") or "").strip().upper()
         trade_value = parsed["value"] or _row_trade_value(row)
         threshold = self._trade_value_threshold(symbol_for_threshold)
         if self.market == NASDAQ_SURGE_MARKET:
-            if day_range > strategy.max_atr_pct:
+            if range_available and day_range > strategy.max_atr_pct:
                 return False, f"range {day_range * 100:.2f}%"
             volume_surge = _row_volume_surge(row)
             if volume_surge < strategy.volume_factor and "volume_surge" not in sources:
@@ -811,14 +832,15 @@ class LiveTrader:
                 return False, spread_reason
             avg_volume = _float(row.get("avrg_vol"))
             volume_surge = (parsed["volume"] / avg_volume) if avg_volume > 0 else _row_volume_surge(row)
-            if volume_surge < strategy.volume_factor and "volume_surge" not in sources:
-                return False, f"volume {volume_surge:.2f}x"
             strength = _row_strength(row)
-            if strength < DOMESTIC_SURGE_MIN_STRENGTH and "strength" not in sources:
-                return False, f"strength {strength * 100:.0f}<130"
-            if trade_value >= threshold or "trade_value" in sources:
+            volume_ok = volume_surge >= strategy.volume_factor or "volume_surge" in sources
+            strength_ok = strength >= DOMESTIC_SURGE_MIN_STRENGTH or "strength" in sources
+            liquidity_ok = trade_value >= threshold or "trade_value" in sources
+            if not liquidity_ok:
+                return False, f"value {trade_value:.0f}<{threshold:.0f}"
+            if volume_ok or strength_ok or len(sources) >= 2:
                 return True, ""
-            return False, f"value {trade_value:.0f}<{threshold:.0f}"
+            return False, f"activity volume {volume_surge:.2f}x strength {strength * 100:.0f}<130"
         if self.market == DOMESTIC_ETF_MARKET:
             if trade_value >= threshold or "trade_value" in sources:
                 return True, ""
@@ -993,7 +1015,8 @@ class LiveTrader:
         latest_trade = result.trades[-1] if result.trades else None
         if not latest_trade:
             self._set_trade_message(self._entry_wait_message(now))
-            _write_live_metrics(result.metrics, self.report_dir)
+            if self.config.mode != "live":
+                _write_live_metrics(result.metrics, self.report_dir)
             return
         if fresh_symbols is not None and latest_trade.symbol not in fresh_symbols:
             self._set_trade_message(f"{latest_trade.symbol}: 현재가 갱신 대기")
@@ -1084,8 +1107,9 @@ class LiveTrader:
                     latest_trade.reason,
                     trade_timestamp=latest_trade.timestamp,
                 ):
-                    _write_live_equity(result.equity_curve, self.report_dir)
-                    _write_live_metrics(result.metrics, self.report_dir)
+                    if self.config.mode != "live":
+                        _write_live_equity(result.equity_curve, self.report_dir)
+                        _write_live_metrics(result.metrics, self.report_dir)
                 return
             response = self._place_order(client, "sell", latest_trade.symbol, latest_trade.shares, live, latest_trade.price)
             if not _order_succeeded(response, live):
@@ -1099,6 +1123,49 @@ class LiveTrader:
         with self.lock:
             self.status["orders"] = int(self.status.get("orders", 0)) + 1
             self.status["trade_message"] = f"최근 주문: {latest_trade.action} {latest_trade.symbol} {latest_trade.shares}주 ({latest_trade.reason})"
+
+    def _write_live_state_report(self, now: datetime) -> None:
+        row = self._live_equity_row(now)
+        _write_live_state_equity(row, self.report_dir, self.strategy.initial_capital)
+        metrics = _live_metrics_from_report(
+            self.report_dir,
+            strategy_name=_strategy_name(self.market),
+            fallback_initial=self.strategy.initial_capital,
+        )
+        _write_live_metrics(metrics, self.report_dir)
+
+    def _live_equity_row(self, now: datetime) -> dict[str, Any]:
+        with self.lock:
+            cash = float(self.cash)
+            positions = [dict(position) for position in self.positions]
+        total_shares = 0
+        total_position_value = 0.0
+        symbols = []
+        mark_price = 0.0
+        for position in positions:
+            symbol = str(position.get("symbol") or "")
+            shares = int(position.get("shares") or 0)
+            if not symbol or shares <= 0:
+                continue
+            latest_bar = _latest_symbol_bar(self.bars, symbol, now.date())
+            price = float(latest_bar.close) if latest_bar else float(position.get("entry_price") or 0.0)
+            if price <= 0:
+                price = float(position.get("entry_price") or 0.0)
+            symbols.append(symbol)
+            total_shares += shares
+            total_position_value += shares * price
+            mark_price = price if len(symbols) == 1 else 0.0
+        equity = cash + total_position_value
+        return {
+            "datetime": now.replace(second=0, microsecond=0).isoformat(sep=" ", timespec="minutes"),
+            "cash": round(cash, 2),
+            "symbol": ",".join(symbols),
+            "shares": total_shares,
+            "mark_price": round(mark_price, 4),
+            "equity": round(equity, 2),
+            "drawdown": 0.0,
+            "paused": 0,
+        }
 
     def _try_live_direct_entry(
         self,
@@ -1425,9 +1492,9 @@ class LiveTrader:
             cash_after=self.cash,
             positions=[dict(position) for position in self.positions],
         )
-        if equity_curve:
+        if equity_curve and self.config.mode != "live":
             _write_live_equity(equity_curve, self.report_dir)
-        if metrics:
+        if metrics and self.config.mode != "live":
             _write_live_metrics(metrics, self.report_dir)
         with self.lock:
             self.status["orders"] = int(self.status.get("orders", 0)) + 1
@@ -1849,21 +1916,37 @@ class LiveTrader:
             self.status["strategy_tone"] = tone
 
     def _stable_tone(self, now: datetime, strategy: StockScannerConfig) -> str:
-        """히스테리시스 적용 톤. raw 신호가 3사이클 연속 같아야 실제 전환한다."""
-        _TONE_SWITCH_MIN_CYCLES = 3
-        raw = self._market_tone(now, strategy)
+        """시간 기반 히스테리시스 적용 톤. 공격 전환은 느리게, 방어 전환은 빠르게 확인한다."""
+        signal = self._market_tone_signal(now, strategy)
+        raw = signal.tone
+        if self._tone_current_since is None:
+            self._tone_current_since = now - timedelta(seconds=TONE_MIN_HOLD_SECONDS)
         if raw == self._tone_pending:
             self._tone_pending_count += 1
         else:
             self._tone_pending = raw
             self._tone_pending_count = 1
-        if self._tone_pending_count >= _TONE_SWITCH_MIN_CYCLES:
-            self._tone_current = raw
+            self._tone_pending_since = now
+        if self._tone_pending_since is None:
+            self._tone_pending_since = now
+        if raw == self._tone_current:
+            return self._tone_current
+        if self._urgent_conservative_signal(now, strategy, signal):
+            return self._commit_tone("conservative", now)
+        held_seconds = (now - self._tone_current_since).total_seconds()
+        pending_seconds = (now - self._tone_pending_since).total_seconds()
+        if held_seconds < TONE_MIN_HOLD_SECONDS:
+            return self._tone_current
+        if pending_seconds >= _tone_confirm_seconds(raw):
+            return self._commit_tone(raw, now)
         return self._tone_current
 
     def _market_tone(self, now: datetime, strategy: StockScannerConfig) -> str:
+        return self._market_tone_signal(now, strategy).tone
+
+    def _market_tone_signal(self, now: datetime, strategy: StockScannerConfig) -> MarketToneSignal:
         if not strategy.adaptive_market_regime:
-            return "neutral"
+            return MarketToneSignal()
         candidates = list(DOMESTIC_ETF_INDEX_PROXIES) if not _is_overseas_market(self.market) else []
         candidates.extend(self.active_symbols)
         symbols: list[str] = []
@@ -1871,7 +1954,7 @@ class LiveTrader:
             if symbol not in symbols:
                 symbols.append(symbol)
         if not symbols:
-            return "neutral"
+            return MarketToneSignal()
 
         move_samples: list[float] = []
         above_vwap = 0
@@ -1891,14 +1974,33 @@ class LiveTrader:
 
         sample_count = len(move_samples)
         if sample_count < 3:
-            return "neutral"
+            return MarketToneSignal(sample_count=sample_count)
         avg_move = sum(move_samples) / sample_count
         breadth = above_vwap / sample_count
         if avg_move >= 0.006 and breadth >= 0.6:
-            return "aggressive"
-        if avg_move <= 0.0015 or breadth < 0.45:
-            return "conservative"
-        return "neutral"
+            tone = "aggressive"
+        elif avg_move <= 0.0015 or breadth < 0.45:
+            tone = "conservative"
+        else:
+            tone = "neutral"
+        return MarketToneSignal(tone=tone, avg_move=avg_move, breadth=breadth, sample_count=sample_count)
+
+    def _commit_tone(self, tone: str, now: datetime) -> str:
+        if tone != self._tone_current:
+            self._tone_current = tone
+            self._tone_current_since = now
+        return self._tone_current
+
+    def _urgent_conservative_signal(self, now: datetime, strategy: StockScannerConfig, signal: MarketToneSignal) -> bool:
+        if signal.tone != "conservative":
+            return False
+        if signal.sample_count >= 3 and signal.avg_move <= TONE_EXTREME_WEAK_MOVE and signal.breadth <= TONE_EXTREME_WEAK_BREADTH:
+            return True
+        if strategy.daily_stop_loss_pct > 0:
+            self._sync_daily_state(now)
+            if self._daily_return(now) <= -(strategy.daily_stop_loss_pct * TONE_URGENT_STOP_RATIO):
+                return True
+        return False
 
     def _strategy_by_tone(self, strategy: StockScannerConfig, tone: str) -> StockScannerConfig:
         if tone == "aggressive":
@@ -2449,6 +2551,14 @@ def _daily_entry_limit_message(entry_count: int, max_trades_per_day: int) -> str
     return f"일일 진입 한도 도달 ({entry_count}/{max_trades_per_day}회)"
 
 
+def _tone_confirm_seconds(tone: str) -> int:
+    if tone == "aggressive":
+        return TONE_AGGRESSIVE_CONFIRM_SECONDS
+    if tone == "conservative":
+        return TONE_CONSERVATIVE_CONFIRM_SECONDS
+    return TONE_NEUTRAL_CONFIRM_SECONDS
+
+
 def _max_positions_message(position_count: int, max_positions: int) -> str:
     return f"최대 동시보유 도달 ({position_count}/{max_positions}종목)"
 
@@ -2469,8 +2579,86 @@ def _write_live_equity(rows: list[dict[str, Any]], report_dir: Path) -> None:
         writer.writerows(rows)
 
 
+def _write_live_state_equity(row: dict[str, Any], report_dir: Path, fallback_initial: float) -> None:
+    ensure_live_report(report_dir)
+    rows = _load_live_equity_rows(report_dir)
+    row_key = str(row.get("datetime") or "")
+    replaced = False
+    merged: list[dict[str, Any]] = []
+    for existing in rows:
+        if str(existing.get("datetime") or "") == row_key:
+            merged.append(dict(row))
+            replaced = True
+        else:
+            merged.append(existing)
+    if not replaced:
+        merged.append(dict(row))
+    merged = [item for item in merged if str(item.get("datetime") or "")]
+    merged.sort(key=lambda item: str(item.get("datetime") or ""))
+
+    first_equity = _float(merged[0].get("equity")) if merged else fallback_initial
+    peak = first_equity if first_equity > 0 else fallback_initial
+    for item in merged:
+        equity = _float(item.get("equity"))
+        if equity <= 0:
+            equity = _float(item.get("cash"))
+            item["equity"] = round(equity, 2)
+        peak = max(peak, equity)
+        item["drawdown"] = round((equity / peak) - 1.0, 6) if peak > 0 else 0.0
+
+    _write_live_equity(merged, report_dir)
+
+
 def _write_live_metrics(metrics: dict[str, Any], report_dir: Path) -> None:
     (report_dir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_live_equity_rows(report_dir: Path) -> list[dict[str, Any]]:
+    path = report_dir / "equity_curve.csv"
+    if not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as csv_file:
+        return list(csv.DictReader(csv_file))
+
+
+def _live_metrics_from_report(report_dir: Path, *, strategy_name: str, fallback_initial: float) -> dict[str, Any]:
+    equity_rows = _load_live_equity_rows(report_dir)
+    trade_rows = _load_trade_rows(report_dir)
+    first_equity = _float(equity_rows[0].get("equity")) if equity_rows else 0.0
+    initial = first_equity if first_equity > 0 else fallback_initial
+    final = _float(equity_rows[-1].get("equity")) if equity_rows else initial
+    total_return = ((final / initial) - 1.0) if initial > 0 else 0.0
+    max_drawdown = min((_float(row.get("drawdown")) for row in equity_rows), default=0.0)
+    trades = [row for row in trade_rows if str(row.get("action") or "").strip()]
+    sell_trades = [row for row in trades if str(row.get("action") or "").upper().startswith("SELL")]
+    realized_pnl = sum(_float(row.get("realized_pnl")) for row in sell_trades)
+    explicit_cost = sum(_float(row.get("cost")) for row in trades)
+    wins = sum(1 for row in sell_trades if _float(row.get("realized_pnl")) > 0)
+    exposure_count = sum(1 for row in equity_rows if int(_float(row.get("shares"))) > 0)
+    symbols = {str(row.get("symbol") or "").strip() for row in trades if str(row.get("symbol") or "").strip()}
+    sessions = {
+        str(row.get("datetime") or row.get("date") or "")[:10]
+        for row in equity_rows
+        if str(row.get("datetime") or row.get("date") or "")
+    }
+    return {
+        "strategy": strategy_name,
+        "symbols": len(symbols),
+        "sessions": len(sessions),
+        "start_datetime": equity_rows[0].get("datetime", "") if equity_rows else "",
+        "end_datetime": equity_rows[-1].get("datetime", "") if equity_rows else "",
+        "initial_capital": round(initial, 2),
+        "final_equity": round(final, 2),
+        "total_return_pct": round(total_return * 100.0, 2),
+        "max_drawdown_pct": round(max_drawdown * 100.0, 2),
+        "sharpe_approx": 0.0,
+        "trades": len(trades),
+        "sell_trades": len(sell_trades),
+        "sell_win_rate_pct": round((wins / len(sell_trades)) * 100.0, 2) if sell_trades else 0.0,
+        "realized_pnl": round(realized_pnl, 2),
+        "explicit_trade_cost": round(explicit_cost, 2),
+        "exposure_pct": round((exposure_count / len(equity_rows)) * 100.0, 2) if equity_rows else 0.0,
+    }
 
 
 def _idle_status(market: str = DEFAULT_MARKET) -> dict[str, Any]:

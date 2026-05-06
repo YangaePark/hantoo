@@ -6,7 +6,7 @@ import mimetypes
 import os
 from collections import deque
 from dataclasses import replace
-from datetime import datetime
+from datetime import date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -74,7 +74,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/live/config":
             self._json(load_live_config(_market_from_query(parsed)).to_dict())
         elif parsed.path == "/api/live/status":
-            self._json(live_status(_market_from_query(parsed)))
+            self._json(load_live_status(_market_from_query(parsed)))
         elif parsed.path == "/api/live/decisions":
             self._json(load_live_decisions(_market_from_query(parsed), _limit_from_query(parsed)))
         else:
@@ -185,6 +185,10 @@ def list_reports() -> list[dict]:
         if not metrics_path.exists():
             continue
         metrics = _read_json_file(metrics_path)
+        trades = _read_csv_file(path / "trades.csv")
+        equity = _read_csv_file(path / "equity_curve.csv")
+        if _is_live_report_name(path.name):
+            metrics = _normalized_report_metrics(metrics, trades, equity)
         reports.append(
             {
                 "name": path.name,
@@ -209,7 +213,12 @@ def load_report(name: str) -> dict:
     metrics = _read_json_file(report_dir / "metrics.json")
     trades = _read_csv_file(report_dir / "trades.csv")
     equity = _read_csv_file(report_dir / "equity_curve.csv")
+    if _is_live_report_name(name):
+        metrics = _normalized_report_metrics(metrics, trades, equity)
     tone_summary = _build_tone_summary(report_dir, trades)
+    market = _market_from_report_name(name)
+    daily_pnl = _daily_pnl_series(equity, trades)
+    daily_summary = _daily_summary(market, trades, daily_pnl)
     return {
         "name": name,
         "label": _report_label(name, metrics),
@@ -218,7 +227,20 @@ def load_report(name: str) -> dict:
         "equity_curve": equity,
         "current": current_snapshot(metrics, trades, equity),
         "tone_summary": tone_summary,
+        "daily_summary": daily_summary,
+        "daily_pnl": daily_pnl,
     }
+
+
+def load_live_status(market: str = DEFAULT_MARKET) -> dict:
+    market = _market(market)
+    status = dict(live_status(market))
+    report_dir = live_report_dir(market)
+    trades = _read_csv_file(report_dir / "trades.csv")
+    equity = _read_csv_file(report_dir / "equity_curve.csv")
+    daily_pnl = _daily_pnl_series(equity, trades)
+    status["daily_summary"] = _daily_summary(market, trades, daily_pnl)
+    return status
 
 
 def _build_tone_summary(report_dir: Path, trades: list[dict]) -> dict:
@@ -313,14 +335,163 @@ def current_snapshot(metrics: dict, trades: list[dict], equity: list[dict]) -> d
     open_symbol = last_equity.get("symbol") or metrics.get("symbol") or ""
     open_shares = _to_number(last_equity.get("shares", 0))
     last_trade = trades[-1] if trades else {}
+    cash = _to_number(last_equity.get("cash", 0))
+    if not equity and not open_shares:
+        cash = _to_number(metrics.get("final_equity", 0))
     return {
         "time": last_equity.get("datetime") or last_equity.get("date") or metrics.get("end_datetime") or metrics.get("end_date"),
         "equity": _to_number(last_equity.get("equity", metrics.get("final_equity", 0))),
-        "cash": _to_number(last_equity.get("cash", 0)),
+        "cash": cash,
         "open_symbol": open_symbol if open_shares else "",
         "open_shares": open_shares,
         "last_trade": last_trade,
     }
+
+
+def _is_live_report_name(name: str) -> bool:
+    return str(name or "").startswith("live_trading")
+
+
+def _normalized_report_metrics(metrics: dict, trades: list[dict], equity: list[dict]) -> dict:
+    if not equity:
+        return metrics
+    normalized = dict(metrics)
+    first_equity = _to_number(equity[0].get("equity", 0))
+    initial = first_equity if first_equity > 0 else _to_number(metrics.get("initial_capital", 0))
+    final = _to_number(equity[-1].get("equity", metrics.get("final_equity", 0)))
+    if initial > 0 and final > 0:
+        normalized["initial_capital"] = round(initial, 2)
+        normalized["final_equity"] = round(final, 2)
+        normalized["total_return_pct"] = round(((final / initial) - 1.0) * 100.0, 2)
+    drawdowns = [_to_number(row.get("drawdown", 0)) for row in equity]
+    if drawdowns:
+        normalized["max_drawdown_pct"] = round(min(drawdowns) * 100.0, 2)
+    trade_rows = [row for row in trades if str(row.get("action") or "").strip()]
+    sell_rows = [row for row in trade_rows if str(row.get("action") or "").upper().startswith("SELL")]
+    if trade_rows:
+        wins = sum(1 for row in sell_rows if _to_number(row.get("realized_pnl", 0)) > 0)
+        normalized["trades"] = len(trade_rows)
+        normalized["sell_trades"] = len(sell_rows)
+        normalized["sell_win_rate_pct"] = round((wins / len(sell_rows)) * 100.0, 2) if sell_rows else 0.0
+        normalized["realized_pnl"] = round(sum(_to_number(row.get("realized_pnl", 0)) for row in sell_rows), 2)
+        normalized["explicit_trade_cost"] = round(sum(_to_number(row.get("cost", 0)) for row in trade_rows), 2)
+    return normalized
+
+
+def _market_from_report_name(name: str) -> str | None:
+    report_markets = {
+        "live_trading": DEFAULT_MARKET,
+        "live_trading_overseas": OVERSEAS_MARKET,
+        "live_trading_nasdaq_surge": NASDAQ_SURGE_MARKET,
+        "live_trading_domestic_surge": DOMESTIC_SURGE_MARKET,
+        "live_trading_domestic_etf": DOMESTIC_ETF_MARKET,
+    }
+    return report_markets.get(str(name or ""))
+
+
+def _daily_summary(
+    market: str | None,
+    trades: list[dict],
+    daily_pnl: list[dict],
+    *,
+    today: date | None = None,
+) -> dict:
+    today_key = (today or datetime.now().date()).isoformat()
+    entry_limit = _daily_entry_limit(market)
+    entries_used = _entry_count_for_date(trades, today_key)
+    day_row = next((row for row in daily_pnl if row.get("date") == today_key), {})
+    return {
+        "date": today_key,
+        "entry_limit": entry_limit,
+        "entries_used": entries_used,
+        "entry_remaining": max(0, entry_limit - entries_used) if entry_limit > 0 else 0,
+        "pnl_amount": round(_to_number(day_row.get("pnl_amount", 0)), 2),
+        "return_pct": round(_to_number(day_row.get("return_pct", 0)), 2),
+        "realized_pnl": round(_to_number(day_row.get("realized_pnl", 0)), 2),
+    }
+
+
+def _daily_entry_limit(market: str | None) -> int:
+    if not market:
+        return 0
+    try:
+        return int(load_live_strategy_config(market).max_trades_per_day)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _daily_pnl_series(equity: list[dict], trades: list[dict]) -> list[dict]:
+    equity_by_date: dict[str, list[float]] = {}
+    for row in equity:
+        key = _date_key(row.get("datetime") or row.get("date"))
+        value = _to_number(row.get("equity", row.get("cash", 0)))
+        if key and value > 0:
+            equity_by_date.setdefault(key, []).append(value)
+
+    trade_stats = _trade_stats_by_date(trades)
+    dates = sorted(set(equity_by_date) | set(trade_stats))
+    rows: list[dict] = []
+    previous_close = 0.0
+    for key in dates:
+        values = equity_by_date.get(key, [])
+        stats = trade_stats.get(key, {})
+        if values:
+            start = previous_close if previous_close > 0 else values[0]
+            end = values[-1]
+            pnl_amount = end - start
+            # Older live reports may have stale flat equity rows; use realized PnL when it is the only movement signal.
+            if abs(pnl_amount) < 0.005 and abs(_to_number(stats.get("realized_pnl"))) > 0:
+                pnl_amount = _to_number(stats.get("realized_pnl"))
+            previous_close = end
+        else:
+            start = previous_close
+            end = previous_close
+            pnl_amount = _to_number(stats.get("realized_pnl"))
+        base = start if start > 0 else 0.0
+        rows.append(
+            {
+                "date": key,
+                "start_equity": round(start, 2),
+                "end_equity": round(end, 2),
+                "pnl_amount": round(pnl_amount, 2),
+                "return_pct": round((pnl_amount / base) * 100.0, 2) if base > 0 else 0.0,
+                "entries": int(stats.get("entries", 0) or 0),
+                "trades": int(stats.get("trades", 0) or 0),
+                "realized_pnl": round(_to_number(stats.get("realized_pnl")), 2),
+            }
+        )
+    return rows
+
+
+def _trade_stats_by_date(trades: list[dict]) -> dict[str, dict]:
+    stats: dict[str, dict] = {}
+    for trade in trades:
+        key = _date_key(trade.get("timestamp") or trade.get("date"))
+        if not key:
+            continue
+        item = stats.setdefault(key, {"entries": 0, "trades": 0, "realized_pnl": 0.0})
+        action = str(trade.get("action") or "").upper()
+        if action:
+            item["trades"] += 1
+        if action == "BUY":
+            item["entries"] += 1
+        if action.startswith("SELL"):
+            item["realized_pnl"] += _to_number(trade.get("realized_pnl"))
+    return stats
+
+
+def _entry_count_for_date(trades: list[dict], date_key: str) -> int:
+    return sum(
+        1
+        for trade in trades
+        if str(trade.get("action") or "").upper() == "BUY"
+        and _date_key(trade.get("timestamp") or trade.get("date")) == date_key
+    )
+
+
+def _date_key(value: object) -> str:
+    text = str(value or "").strip()
+    return text[:10] if len(text) >= 10 else ""
 
 
 def load_kis_key_status(market: str = DEFAULT_MARKET) -> dict:

@@ -311,6 +311,45 @@ class LiveConfigTests(unittest.TestCase):
         self.assertLessEqual(strategy.gap_min_pct, 0.008)
         self.assertLessEqual(strategy.volume_factor, 1.3)
 
+    def test_market_tone_requires_long_confirm_before_aggressive(self):
+        trader = LiveTrader(LiveConfig(mode="live"), StockScannerConfig())
+        strategy = StockScannerConfig(adaptive_market_regime=True)
+        start = datetime(2026, 4, 30, 9, 0)
+        trader.active_symbols = ["000001", "000002", "000003"]
+        trader.bars = _tone_bars(trader.active_symbols, start, [101.0, 101.0, 101.0])
+
+        self.assertEqual(trader._stable_tone(start, strategy), "neutral")
+        self.assertEqual(trader._stable_tone(start + timedelta(minutes=9), strategy), "neutral")
+        self.assertEqual(trader._stable_tone(start + timedelta(minutes=10), strategy), "aggressive")
+
+    def test_market_tone_respects_minimum_hold_time(self):
+        trader = LiveTrader(LiveConfig(mode="live"), StockScannerConfig())
+        strategy = StockScannerConfig(adaptive_market_regime=True)
+        start = datetime(2026, 4, 30, 9, 0)
+        trader.active_symbols = ["000001", "000002", "000003"]
+        trader.bars = _tone_bars(trader.active_symbols, start, [101.0, 101.0, 101.0])
+        trader._stable_tone(start, strategy)
+        trader._stable_tone(start + timedelta(minutes=10), strategy)
+
+        trader.bars = _tone_bars(trader.active_symbols, start, [100.1, 100.1, 100.1])
+        self.assertEqual(trader._stable_tone(start + timedelta(minutes=12), strategy), "aggressive")
+        self.assertEqual(trader._stable_tone(start + timedelta(minutes=15), strategy), "aggressive")
+        self.assertEqual(trader._stable_tone(start + timedelta(minutes=20), strategy), "conservative")
+
+    def test_market_tone_can_switch_to_conservative_near_daily_stop(self):
+        trader = LiveTrader(LiveConfig(mode="live"), StockScannerConfig())
+        strategy = StockScannerConfig(adaptive_market_regime=True, daily_stop_loss_pct=0.02)
+        now = datetime(2026, 4, 30, 10, 0)
+        trader.active_symbols = ["000001", "000002", "000003"]
+        trader.bars = _tone_bars(trader.active_symbols, now, [100.1, 100.1, 100.1])
+        trader._tone_current = "aggressive"
+        trader._tone_current_since = now
+        trader.day_state_date = now.date()
+        trader.day_start_cash = 1000.0
+        trader.cash = 981.0
+
+        self.assertEqual(trader._stable_tone(now, strategy), "conservative")
+
     def test_entry_wait_message_summarizes_all_active_symbol_reasons(self):
         strategy = replace(StockScannerConfig(), observation_minutes=20)
         trader = LiveTrader(LiveConfig(), strategy)
@@ -364,6 +403,15 @@ class LiveConfigTests(unittest.TestCase):
         self.assertEqual(selected, ["IREN"])
         self.assertIn("나스닥 급등주 자동선별", trader.status["selector_message"])
 
+    def test_nasdaq_surge_selector_does_not_drop_missing_day_range(self):
+        config = LiveConfig.from_dict({"market": "nasdaq_surge", "max_symbols": 2, "candidate_pool_size": 10})
+        strategy = StockScannerConfig(gap_min_pct=0.04, gap_max_pct=0.18, volume_factor=1.4, min_atr_pct=0.006, max_atr_pct=0.18)
+        trader = LiveTrader(config, strategy)
+
+        selected = trader._select_symbols(FakeNasdaqSurgeNoRangeClient())
+
+        self.assertEqual(selected, ["IREN"])
+
     def test_domestic_etf_candidates_include_one_x_etfs_only(self):
         config = LiveConfig.from_dict({"market": "domestic_etf"})
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -386,6 +434,45 @@ class LiveConfigTests(unittest.TestCase):
 
         self.assertEqual(selected, ["005930"])
         self.assertIn("국내 급등주 자동선별", trader.status["selector_message"])
+
+    def test_domestic_surge_selector_keeps_liquid_gap_without_strength_row(self):
+        config = LiveConfig.from_dict({"market": "domestic_surge", "max_symbols": 2, "candidate_pool_size": 10})
+        strategy = StockScannerConfig(gap_min_pct=0.03, gap_max_pct=0.12, volume_factor=1.2, min_atr_pct=0.002, max_atr_pct=0.12)
+        trader = LiveTrader(config, strategy)
+
+        selected = trader._select_symbols(FakeDomesticSurgeNoStrengthClient())
+
+        self.assertEqual(selected, ["005930"])
+
+    def test_empty_selection_waits_for_refresh_interval(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = LiveConfig.from_dict({"market": "domestic_surge", "selection_refresh_sec": 60})
+            trader = LiveTrader(config, StockScannerConfig(gap_min_pct=0.03, gap_max_pct=0.12), report_dir=Path(tmpdir))
+            client = EmptyDomesticSurgeRankClient()
+            now = datetime(2026, 4, 30, 10, 0)
+
+            trader._run_cycle(client, now)
+            first_calls = client.calls
+            trader._run_cycle(client, now + timedelta(seconds=5))
+
+            self.assertGreater(first_calls, 0)
+            self.assertEqual(client.calls, first_calls)
+
+    def test_live_cycle_writes_metrics_from_actual_cash(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_dir = Path(tmpdir)
+            config = LiveConfig.from_dict({"market": "domestic_surge", "mode": "live", "selection_refresh_sec": 60})
+            strategy = StockScannerConfig(initial_capital=200_000, gap_min_pct=0.03, gap_max_pct=0.12)
+            trader = LiveTrader(config, strategy, report_dir=report_dir)
+            trader.cash = 200_000
+
+            trader._run_cycle(EmptyDomesticSurgeRankClient(), datetime(2026, 4, 30, 10, 0))
+
+            metrics = json.loads((report_dir / "metrics.json").read_text(encoding="utf-8"))
+            self.assertEqual(metrics["initial_capital"], 200_000)
+            self.assertEqual(metrics["final_equity"], 200_000)
+            self.assertEqual(metrics["total_return_pct"], 0.0)
+            self.assertIn("2026-04-30 10:00", (report_dir / "equity_curve.csv").read_text(encoding="utf-8"))
 
     def test_domestic_surge_direct_entry_uses_limit_buy(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1140,6 +1227,18 @@ class FakeNasdaqSurgeRankClient:
         return {"output": prices[symbol]}
 
 
+class FakeNasdaqSurgeNoRangeClient(FakeNasdaqSurgeRankClient):
+    def inquire_overseas_price(self, exchange_code, symbol):
+        return {
+            "output": {
+                "last": "12.00",
+                "tvol": "16000000",
+                "tamt": "190000000",
+                "base": "11.20",
+            }
+        }
+
+
 class WeakOverseasRankClient(FakeOverseasRankClient):
     def inquire_overseas_price(self, exchange_code, symbol):
         return {
@@ -1231,6 +1330,52 @@ class FakeDomesticSurgeRankClient:
         }
 
 
+class FakeDomesticSurgeNoStrengthClient:
+    def volume_rank(self, **kwargs):
+        if kwargs.get("sort_code") == "3":
+            return {"output": [{"stck_shrn_iscd": "005930", "hts_kor_isnm": "삼성전자", "acml_tr_pbmn": "2000000000"}]}
+        return {"output": []}
+
+    def fluctuation_rank(self, **kwargs):
+        return {"output": [{"stck_shrn_iscd": "005930", "hts_kor_isnm": "삼성전자"}]}
+
+    def volume_power_rank(self):
+        return {"output": []}
+
+    def inquire_price(self, symbol):
+        return {
+            "output": {
+                "stck_prpr": "106000",
+                "stck_oprc": "103000",
+                "stck_hgpr": "108000",
+                "stck_lwpr": "100000",
+                "acml_vol": "2000000",
+                "acml_tr_pbmn": "210000000000",
+                "prdy_ctrt": "6.0",
+            }
+        }
+
+
+class EmptyDomesticSurgeRankClient:
+    def __init__(self):
+        self.calls = 0
+
+    def volume_rank(self, **kwargs):
+        self.calls += 1
+        return {"output": []}
+
+    def fluctuation_rank(self, **kwargs):
+        self.calls += 1
+        return {"output": []}
+
+    def volume_power_rank(self):
+        self.calls += 1
+        return {"output": []}
+
+    def inquire_price(self, symbol):
+        raise AssertionError("no symbols should be polled")
+
+
 class FakeDomesticOrderClient:
     def __init__(self):
         self.orders = []
@@ -1274,6 +1419,15 @@ class FakeStartupTokenClient:
 def _read_decision_logs(report_dir: Path):
     path = report_dir / "decision_log.jsonl"
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _tone_bars(symbols, start: datetime, closes: list[float]) -> list[StockBar]:
+    bars = []
+    for symbol in symbols:
+        bars.append(StockBar(symbol, start - timedelta(days=1), 100.0, 100.0, 100.0, 100.0, 1))
+        for idx, close in enumerate(closes):
+            bars.append(StockBar(symbol, start + timedelta(minutes=idx), close, close, close, close, 1000))
+    return bars
 
 
 class FakeOverseasOrderClient:

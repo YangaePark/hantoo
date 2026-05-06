@@ -389,7 +389,7 @@ class KisClient:
             "OVRS_EXCG_CD": exchange_code,
             "PDNO": symbol,
             "ORD_QTY": str(quantity),
-            "OVRS_ORD_UNPR": _format_overseas_price(price),
+            "OVRS_ORD_UNPR": _format_overseas_price(price, exchange_code),
             "CTAC_TLNO": "",
             "MGCO_APTM_ODNO": "",
             "SLL_TYPE": "00" if side == "sell" else "",
@@ -786,10 +786,12 @@ def _overseas_order_tr_id(exchange_code: str, side: str) -> str:
     raise ValueError(f"unsupported overseas order: exchange_code={exchange_code}, side={side}")
 
 
-def _format_overseas_price(price: float) -> str:
+def _format_overseas_price(price: float, exchange_code: str = "") -> str:
     number = _float(price)
     if number <= 0:
         return "0"
+    if str(exchange_code or "").upper() in {"NASD", "NYSE", "AMEX"} and number >= 1:
+        return f"{number:.2f}"
     return f"{number:.8f}".rstrip("0").rstrip(".")
 
 
