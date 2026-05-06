@@ -11,6 +11,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 from semibot_backtester.stock_scanner import StockScannerConfig
 from semibot_live.kis import (
@@ -44,6 +45,8 @@ ROOT = Path(__file__).resolve().parents[1]
 STATE_ROOT = Path(os.environ.get("SEMIBOT_STATE_ROOT", ROOT)).resolve()
 WEB_ROOT = ROOT / "semibot_web" / "static"
 REPORTS_ROOT = STATE_ROOT / "reports"
+NEW_YORK_TZ = ZoneInfo("America/New_York")
+SEOUL_TZ = ZoneInfo("Asia/Seoul")
 SCANNER_CONFIG_PATH = ROOT / "config" / "volatile_stock_scalp.json"
 OVERSEAS_SCANNER_CONFIG_PATH = ROOT / "config" / "overseas_stock_scalp.json"
 NASDAQ_SURGE_SCANNER_CONFIG_PATH = ROOT / "config" / "nasdaq_surge_scalp.json"
@@ -396,7 +399,7 @@ def _daily_summary(
     *,
     today: date | None = None,
 ) -> dict:
-    today_key = (today or datetime.now().date()).isoformat()
+    today_key = (today or _today_for_market(market)).isoformat()
     entry_limit = _daily_entry_limit(market)
     entries_used = _entry_count_for_date(trades, today_key)
     day_row = next((row for row in daily_pnl if row.get("date") == today_key), {})
@@ -418,6 +421,16 @@ def _daily_entry_limit(market: str | None) -> int:
         return int(load_live_strategy_config(market).max_trades_per_day)
     except Exception:  # noqa: BLE001
         return 0
+
+
+def _today_for_market(market: str | None) -> date:
+    if market and _is_overseas_market_name(market):
+        return datetime.now(NEW_YORK_TZ).date()
+    return datetime.now(SEOUL_TZ).date()
+
+
+def _is_overseas_market_name(market: str) -> bool:
+    return _market(market) in {OVERSEAS_MARKET, NASDAQ_SURGE_MARKET}
 
 
 def _daily_pnl_series(equity: list[dict], trades: list[dict]) -> list[dict]:

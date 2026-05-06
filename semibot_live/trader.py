@@ -75,6 +75,7 @@ OVERSEAS_PREMARKET_MIN_TRADE_VALUE = 2_000_000.0
 DEFAULT_POLL_INTERVAL_SEC = 15
 DEFAULT_MAX_SYMBOLS = 12
 NEW_YORK_TZ = ZoneInfo("America/New_York")
+SEOUL_TZ = ZoneInfo("Asia/Seoul")
 OVERSEAS_FALLBACK_SYMBOLS = [
     "AAPL",
     "NVDA",
@@ -441,11 +442,12 @@ class LiveTrader:
             self.status.update(
                 {
                     "last_tick": now.isoformat(sep=" ", timespec="seconds"),
+                    "market_time": strategy_now.isoformat(sep=" ", timespec="seconds"),
                     "message": "실행 중",
                     "last_error": "",
                     "active_symbols": list(self.active_symbols),
                     "session": session,
-                    "session_label": _session_label(session),
+                    "session_label": _session_label(session, self.market),
                     "bar_count": bar_status["total"],
                     "bar_ready_symbols": bar_status["ready_symbols"],
                     "bar_min_ready": bar_status["min_ready"],
@@ -455,21 +457,19 @@ class LiveTrader:
             )
 
     def _set_market_wait_status(self, now: datetime, strategy_now: datetime) -> None:
-        message = "프리장 비활성화: 09:30 본장 대기"
-        if self.config.overseas_premarket_enabled:
-            message = "해외장 대기: 프리장 04:00 시작"
-            if strategy_now.time() >= clock_time(16, 0):
-                message = "해외장 종료: 다음 프리장 대기"
+        message = _market_wait_message(self.market, strategy_now, self.config.overseas_premarket_enabled)
+        label = _session_label(SESSION_CLOSED, self.market)
         with self.lock:
             self.status.update(
                 {
                     "last_tick": now.isoformat(sep=" ", timespec="seconds"),
-                    "message": "해외장 대기",
+                    "market_time": strategy_now.isoformat(sep=" ", timespec="seconds"),
+                    "message": label,
                     "last_error": "",
                     "selector_message": message,
                     "active_symbols": list(self.active_symbols),
                     "session": SESSION_CLOSED,
-                    "session_label": "해외장 대기",
+                    "session_label": label,
                     "price_error_count": 0,
                 }
             )
@@ -591,9 +591,9 @@ class LiveTrader:
 
     def _strategy_now(self, now: datetime) -> datetime:
         if _is_overseas_market(self.market):
-            return datetime.now(NEW_YORK_TZ).replace(tzinfo=None)
+            return _as_market_time(now, NEW_YORK_TZ)
         if not self.config.clock_offset_hours:
-            return now
+            return _as_market_time(now, SEOUL_TZ)
         return now + timedelta(hours=self.config.clock_offset_hours)
 
     def _market_session(self, now: datetime) -> str:
@@ -605,6 +605,8 @@ class LiveTrader:
                 return SESSION_REGULAR
             return SESSION_CLOSED
         current = now.time()
+        if now.weekday() >= 5:
+            return SESSION_CLOSED
         if clock_time(9, 30) <= current < clock_time(16, 0):
             return SESSION_REGULAR
         if self.config.overseas_premarket_enabled and clock_time(4, 0) <= current < clock_time(9, 30):
@@ -2686,6 +2688,7 @@ def _idle_status(market: str = DEFAULT_MARKET) -> dict[str, Any]:
         "currency": config.currency,
         "session": "",
         "session_label": "",
+        "market_time": _current_market_time(market).isoformat(sep=" ", timespec="seconds"),
         "overseas_premarket_enabled": config.overseas_premarket_enabled,
         "bar_count": 0,
         "bar_minutes": config.bar_minutes,
@@ -2731,13 +2734,45 @@ def _selector_label(market: str) -> str:
     return "자동선별"
 
 
-def _session_label(session: str) -> str:
-    labels = {
-        SESSION_PREMARKET: "프리장",
-        SESSION_REGULAR: "본장",
-        SESSION_CLOSED: "해외장 대기",
-    }
-    return labels.get(session, "")
+def _session_label(session: str, market: str = DEFAULT_MARKET) -> str:
+    market = _market(market)
+    if session == SESSION_PREMARKET:
+        return "프리장"
+    if session == SESSION_REGULAR:
+        return "본장"
+    if session == SESSION_CLOSED:
+        return "해외장 대기" if _is_overseas_market(market) else "국내장 대기"
+    return ""
+
+
+def _market_wait_message(market: str, now: datetime, premarket_enabled: bool) -> str:
+    market = _market(market)
+    if not _is_overseas_market(market):
+        if now.weekday() >= 5:
+            return "국내장 휴장: 주말"
+        if now.time() < clock_time(9, 0):
+            return "국내장 대기: 09:00 정규장 시작"
+        return "국내장 종료: 다음 정규장 대기"
+    if now.weekday() >= 5:
+        return "해외장 휴장: 주말"
+    if premarket_enabled:
+        if now.time() >= clock_time(16, 0):
+            return "해외장 종료: 다음 프리장 대기"
+        return "해외장 대기: 프리장 04:00 시작"
+    return "프리장 비활성화: 09:30 본장 대기"
+
+
+def _current_market_time(market: str) -> datetime:
+    tz = NEW_YORK_TZ if _is_overseas_market(market) else SEOUL_TZ
+    return datetime.now(tz).replace(tzinfo=None)
+
+
+def _as_market_time(now: datetime, tz: ZoneInfo) -> datetime:
+    if now.tzinfo is None:
+        aware = now.replace(tzinfo=SEOUL_TZ)
+    else:
+        aware = now
+    return aware.astimezone(tz).replace(tzinfo=None)
 
 
 def _market(value: object) -> str:

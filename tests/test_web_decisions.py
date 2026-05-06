@@ -161,6 +161,16 @@ class WebDecisionLogTests(unittest.TestCase):
         self.assertEqual(rows[0]["pnl_amount"], -25.5)
         self.assertEqual(rows[0]["return_pct"], -2.55)
 
+    def test_overseas_daily_summary_uses_market_date_rows(self):
+        trades = [{"timestamp": "2026-05-05 09:35:00", "action": "BUY"}]
+        daily_pnl = [{"date": "2026-05-05", "pnl_amount": "12.5", "return_pct": "1.25"}]
+
+        summary = server._daily_summary("overseas", trades, daily_pnl, today=date(2026, 5, 5))
+
+        self.assertEqual(summary["date"], "2026-05-05")
+        self.assertEqual(summary["entries_used"], 1)
+        self.assertEqual(summary["pnl_amount"], 12.5)
+
     def test_backtest_report_keeps_stored_metrics(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

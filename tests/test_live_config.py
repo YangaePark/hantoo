@@ -374,6 +374,26 @@ class LiveConfigTests(unittest.TestCase):
 
         self.assertEqual(trader._market_session(datetime(2026, 4, 30, 8, 0)), "closed")
         self.assertEqual(trader._market_session(datetime(2026, 4, 30, 10, 0)), "regular")
+        self.assertEqual(trader._market_session(datetime(2026, 5, 2, 10, 0)), "closed")
+
+    def test_overseas_strategy_now_uses_new_york_timezone(self):
+        trader = LiveTrader(LiveConfig.from_dict({"market": "overseas"}), StockScannerConfig())
+
+        summer = trader._strategy_now(datetime(2026, 5, 6, 22, 30))
+        winter = trader._strategy_now(datetime(2026, 1, 6, 23, 30))
+
+        self.assertEqual(summer.strftime("%Y-%m-%d %H:%M"), "2026-05-06 09:30")
+        self.assertEqual(winter.strftime("%Y-%m-%d %H:%M"), "2026-01-06 09:30")
+
+    def test_domestic_market_wait_status_uses_domestic_label(self):
+        trader = LiveTrader(LiveConfig.from_dict({"market": "domestic"}), StockScannerConfig())
+
+        trader._set_market_wait_status(datetime(2026, 5, 6, 8, 30), datetime(2026, 5, 6, 8, 30))
+
+        snapshot = trader.snapshot()
+        self.assertEqual(snapshot["message"], "국내장 대기")
+        self.assertEqual(snapshot["session_label"], "국내장 대기")
+        self.assertIn("09:00", snapshot["selector_message"])
 
     def test_market_wait_clears_stale_price_error_count(self):
         config = LiveConfig.from_dict({"market": "overseas", "overseas_premarket_enabled": True})

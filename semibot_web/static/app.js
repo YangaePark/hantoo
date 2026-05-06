@@ -409,6 +409,7 @@ async function loadLiveStatus() {
   pieces.push(`프로파일: ${status.strategy_profile_mode || "auto"}`);
   if (status.strategy_tone) pieces.push(`톤: ${toneLabel(status.strategy_tone)}`);
   if (status.session_label) pieces.push(`세션: ${status.session_label}`);
+  if (status.market_time) pieces.push(`시장시각: ${status.market_time}`);
   if (status.last_tick) pieces.push(`최근: ${status.last_tick}`);
   if (positions.length) {
     pieces.push(`보유: ${positions.map((item) => `${item.symbol} ${item.shares}주`).join(", ")}`);
