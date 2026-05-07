@@ -69,9 +69,10 @@ DOMESTIC_ETF_TRADE_VALUE_BY_SYMBOL: dict[str, float] = {
     "364970": 200_000_000.0,    # TIGER 바이오TOP10
 }
 DOMESTIC_ETF_DEFAULT_TRADE_VALUE = 200_000_000.0
-OVERSEAS_MIN_PRICE = 5.0
+OVERSEAS_MIN_PRICE = 10.0
 OVERSEAS_MIN_TRADE_VALUE = 20_000_000.0
 OVERSEAS_PREMARKET_MIN_TRADE_VALUE = 2_000_000.0
+SYMBOL_REENTRY_BLOCK_MINUTES = 45
 DEFAULT_POLL_INTERVAL_SEC = 15
 DEFAULT_MAX_SYMBOLS = 12
 NEW_YORK_TZ = ZoneInfo("America/New_York")
@@ -1213,6 +1214,17 @@ class LiveTrader:
                 continue
             if fresh_symbols is not None and symbol not in fresh_symbols:
                 continue
+            exit_blocked_until = _live_symbol_exit_reentry_block_until(self.report_dir, symbol, now.date())
+            if exit_blocked_until and now < exit_blocked_until:
+                self._set_trade_message(f"{symbol}: 매도 후 재진입 대기 ({exit_blocked_until.strftime('%H:%M')}까지)")
+                self._log_decision(
+                    "entry_skip",
+                    now,
+                    symbol=symbol,
+                    reason="symbol_reentry_cooldown",
+                    blocked_until=exit_blocked_until.strftime("%Y-%m-%d %H:%M:%S"),
+                )
+                continue
             if strategy.stop_loss_reentry_block_minutes > 0:
                 blocked_until = _live_symbol_stop_loss_reentry_block_until(
                     self.report_dir,
@@ -1273,6 +1285,17 @@ class LiveTrader:
                 max_positions=self.config.max_positions,
             )
             return False
+        exit_blocked_until = _live_symbol_exit_reentry_block_until(self.report_dir, symbol, now.date())
+        if exit_blocked_until and now < exit_blocked_until:
+            self._set_trade_message(f"{symbol}: 매도 후 재진입 대기 ({exit_blocked_until.strftime('%H:%M')}까지)")
+            self._log_decision(
+                "entry_skip",
+                now,
+                symbol=symbol,
+                reason="symbol_reentry_cooldown",
+                blocked_until=exit_blocked_until.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            return False
         if strategy.stop_loss_reentry_block_minutes > 0:
             blocked_until = _live_symbol_stop_loss_reentry_block_until(
                 self.report_dir,
@@ -1313,6 +1336,8 @@ class LiveTrader:
             return f"{strategy.entry_start_time} 전 신규 진입 대기"
         if now.time() >= strategy.entry_cutoff_clock:
             return f"{strategy.entry_cutoff_time or strategy.force_exit_time} 이후 신규 진입 중단"
+        if strategy.adaptive_market_regime and str(self.status.get("strategy_tone") or "").lower() == "conservative":
+            return "보수 장세 신규 진입 중단"
         daily_return = self._daily_return(now)
         if strategy.daily_take_profit_pct > 0 and daily_return >= strategy.daily_take_profit_pct:
             return f"일일 목표 도달 ({daily_return * 100:.2f}%)"
@@ -1781,10 +1806,9 @@ class LiveTrader:
             prefix = "프리장 "
         else:
             prefix = ""
-        if now.time() < strategy.entry_start_clock:
-            return f"{strategy.entry_start_time} 전 신규 진입 대기"
-        if now.time() >= strategy.entry_cutoff_clock:
-            return f"{strategy.entry_cutoff_time or strategy.force_exit_time} 이후 신규 진입 중단"
+        risk_block = self._entry_risk_block(now, strategy)
+        if risk_block:
+            return f"{prefix}{risk_block}"
         entry_count = _live_buy_count_for_session(self.report_dir, now.date())
         if entry_count >= strategy.max_trades_per_day:
             return _daily_entry_limit_message(entry_count, strategy.max_trades_per_day)
@@ -1904,7 +1928,7 @@ class LiveTrader:
                 max_atr_pct=max(self.strategy.max_atr_pct, 0.08),
                 min_edge_bps=min(self.strategy.min_edge_bps, 15.0),
                 max_extension_pct=max(self.strategy.max_extension_pct, 0.07),
-                max_trades_per_day=max(self.strategy.max_trades_per_day, 8),
+                max_trades_per_day=min(self.strategy.max_trades_per_day, 5),
                 cooldown_bars=min(self.strategy.cooldown_bars, 1),
             )
             tone = self._stable_tone(now, base)
@@ -2011,7 +2035,7 @@ class LiveTrader:
                 volume_factor=max(1.1, strategy.volume_factor - 0.15),
                 gap_min_pct=max(0.0, strategy.gap_min_pct - 0.002),
                 risk_per_trade_pct=min(0.015, strategy.risk_per_trade_pct * 1.15),
-                max_trades_per_day=min(12, strategy.max_trades_per_day + 2),
+                max_trades_per_day=strategy.max_trades_per_day,
                 max_position_pct=min(1.0, strategy.max_position_pct * 1.1),
             )
         if tone == "conservative":
@@ -2507,6 +2531,33 @@ def _live_symbol_stop_loss_reentry_block_until(
         if action == "BUY":
             # 최근 이벤트가 BUY라면 직전 손절 블록을 이미 통과한 상태로 본다.
             return None
+    return None
+
+
+def _live_symbol_exit_reentry_block_until(
+    report_dir: Path,
+    symbol: str,
+    session: object,
+    block_minutes: int = SYMBOL_REENTRY_BLOCK_MINUTES,
+) -> datetime | None:
+    if block_minutes <= 0:
+        return None
+    target = str(symbol or "").strip().upper()
+    if not target:
+        return None
+    for row in reversed(_load_trade_rows(report_dir)):
+        if _timestamp_date(row.get("timestamp")) != session:
+            continue
+        if str(row.get("symbol") or "").strip().upper() != target:
+            continue
+        action = str(row.get("action") or "").upper()
+        if action == "BUY":
+            return None
+        if action.startswith("SELL") and action != "SELL_PARTIAL":
+            exited_at = _timestamp_datetime(row.get("timestamp"))
+            if not exited_at:
+                return None
+            return exited_at + timedelta(minutes=max(1, int(block_minutes)))
     return None
 
 

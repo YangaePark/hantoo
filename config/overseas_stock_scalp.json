@@ -1,7 +1,7 @@
 {
   "initial_capital": 10000,
   "entry_start_time": "09:50",
-  "entry_cutoff_time": "15:00",
+  "entry_cutoff_time": "14:00",
   "adaptive_market_regime": true,
   "stop_loss_reentry_block_minutes": 25,
   "observation_minutes": 20,
@@ -26,7 +26,7 @@
   "loss_cooldown_trades": 2,
   "loss_cooldown_minutes": 45,
   "max_consecutive_losses": 3,
-  "max_trades_per_day": 6,
+  "max_trades_per_day": 3,
   "cooldown_bars": 2,
   "min_hold_bars": 1,
   "force_exit_time": "15:50",

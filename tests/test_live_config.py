@@ -310,6 +310,42 @@ class LiveConfigTests(unittest.TestCase):
         self.assertEqual(strategy.top_value_rank, 8)
         self.assertLessEqual(strategy.gap_min_pct, 0.008)
         self.assertLessEqual(strategy.volume_factor, 1.3)
+        self.assertLessEqual(strategy.max_trades_per_day, 5)
+
+    def test_conservative_tone_blocks_adaptive_entries(self):
+        trader = LiveTrader(LiveConfig(mode="live"), StockScannerConfig())
+        trader.status["strategy_tone"] = "conservative"
+        strategy = StockScannerConfig(
+            adaptive_market_regime=True,
+            entry_start_time="09:00",
+            entry_cutoff_time="15:00",
+        )
+
+        message = trader._entry_risk_block(datetime(2026, 4, 30, 10, 0), strategy)
+
+        self.assertEqual(message, "보수 장세 신규 진입 중단")
+
+    def test_same_symbol_reentry_waits_after_any_full_exit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_dir = Path(tmpdir)
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / "trades.csv").write_text(
+                "timestamp,action,symbol,shares,price,gross,cost,realized_pnl,cash_after,reason,mode,order_response,trade_key\n"
+                "2026-04-30 09:05:00,BUY,005930,1,100,100,0,0,999900,live_momentum_entry,live,{},k1\n"
+                "2026-04-30 09:20:00,SELL_ALL,005930,1,103,103,0,3,1000003,live_take_profit,live,{},k2\n",
+                encoding="utf-8",
+            )
+            trader = LiveTrader(LiveConfig(mode="live"), StockScannerConfig(), report_dir=report_dir)
+            strategy = StockScannerConfig(
+                adaptive_market_regime=False,
+                entry_start_time="09:00",
+                entry_cutoff_time="15:00",
+            )
+
+            allowed = trader._can_open_position("005930", datetime(2026, 4, 30, 9, 45), strategy)
+
+            self.assertFalse(allowed)
+            self.assertIn("매도 후 재진입 대기", trader.snapshot()["trade_message"])
 
     def test_market_tone_requires_long_confirm_before_aggressive(self):
         trader = LiveTrader(LiveConfig(mode="live"), StockScannerConfig())
