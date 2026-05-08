@@ -107,7 +107,7 @@ class WebDecisionLogTests(unittest.TestCase):
     def test_load_report_includes_daily_entry_and_pnl_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            report_dir = root / "live_trading_domestic_surge"
+            report_dir = root / "live_trading"
             report_dir.mkdir(parents=True, exist_ok=True)
             (report_dir / "metrics.json").write_text(json.dumps({"strategy": "live"}), encoding="utf-8")
             (report_dir / "equity_curve.csv").write_text(
@@ -128,11 +128,11 @@ class WebDecisionLogTests(unittest.TestCase):
             original_reports_root = server.REPORTS_ROOT
             try:
                 server.REPORTS_ROOT = root
-                data = server.load_report("live_trading_domestic_surge")
+                data = server.load_report("live_trading")
             finally:
                 server.REPORTS_ROOT = original_reports_root
 
-            summary = server._daily_summary("domestic_surge", data["trades"], data["daily_pnl"], today=date(2026, 5, 6))
+            summary = server._daily_summary("domestic", data["trades"], data["daily_pnl"], today=date(2026, 5, 6))
             self.assertEqual(summary["entry_limit"], 3)
             self.assertEqual(summary["entries_used"], 2)
             self.assertEqual(summary["entry_remaining"], 1)

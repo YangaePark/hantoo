@@ -23,10 +23,7 @@ from semibot_live.kis import (
     parse_overseas_psamount_response,
 )
 from semibot_live.trader import (
-    DOMESTIC_ETF_MARKET,
-    DOMESTIC_SURGE_MARKET,
     DEFAULT_MARKET,
-    NASDAQ_SURGE_MARKET,
     OVERSEAS_MARKET,
     SUPPORTED_MARKETS,
     ensure_live_report,
@@ -49,9 +46,6 @@ NEW_YORK_TZ = ZoneInfo("America/New_York")
 SEOUL_TZ = ZoneInfo("Asia/Seoul")
 SCANNER_CONFIG_PATH = ROOT / "config" / "volatile_stock_scalp.json"
 OVERSEAS_SCANNER_CONFIG_PATH = ROOT / "config" / "overseas_stock_scalp.json"
-NASDAQ_SURGE_SCANNER_CONFIG_PATH = ROOT / "config" / "nasdaq_surge_scalp.json"
-DOMESTIC_SURGE_SCANNER_CONFIG_PATH = ROOT / "config" / "domestic_surge_scalp.json"
-DOMESTIC_ETF_SCANNER_CONFIG_PATH = ROOT / "config" / "domestic_etf_scalp.json"
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -184,6 +178,8 @@ def list_reports() -> list[dict]:
     for path in sorted(REPORTS_ROOT.iterdir()):
         if not path.is_dir():
             continue
+        if path.name.startswith("live_trading") and not _is_live_report_name(path.name):
+            continue
         metrics_path = path / "metrics.json"
         if not metrics_path.exists():
             continue
@@ -209,6 +205,8 @@ def list_reports() -> list[dict]:
 def load_report(name: str) -> dict:
     if not _safe_name(name):
         return {"error": "invalid report name"}
+    if name.startswith("live_trading") and not _is_live_report_name(name):
+        return {"error": "report not found"}
     report_dir = REPORTS_ROOT / name
     if not report_dir.exists():
         return {"error": "report not found"}
@@ -352,7 +350,7 @@ def current_snapshot(metrics: dict, trades: list[dict], equity: list[dict]) -> d
 
 
 def _is_live_report_name(name: str) -> bool:
-    return str(name or "").startswith("live_trading")
+    return str(name or "") in {"live_trading", "live_trading_overseas"}
 
 
 def _normalized_report_metrics(metrics: dict, trades: list[dict], equity: list[dict]) -> dict:
@@ -385,9 +383,6 @@ def _market_from_report_name(name: str) -> str | None:
     report_markets = {
         "live_trading": DEFAULT_MARKET,
         "live_trading_overseas": OVERSEAS_MARKET,
-        "live_trading_nasdaq_surge": NASDAQ_SURGE_MARKET,
-        "live_trading_domestic_surge": DOMESTIC_SURGE_MARKET,
-        "live_trading_domestic_etf": DOMESTIC_ETF_MARKET,
     }
     return report_markets.get(str(name or ""))
 
@@ -430,7 +425,7 @@ def _today_for_market(market: str | None) -> date:
 
 
 def _is_overseas_market_name(market: str) -> bool:
-    return _market(market) in {OVERSEAS_MARKET, NASDAQ_SURGE_MARKET}
+    return _market(market) == OVERSEAS_MARKET
 
 
 def _daily_pnl_series(equity: list[dict], trades: list[dict]) -> list[dict]:
@@ -539,7 +534,7 @@ def load_kis_balance(market: str = DEFAULT_MARKET) -> dict:
         return {"ok": False, "message": "계좌번호를 저장한 뒤 조회하세요."}
     client = KisClient(KisCredentials.from_file(keys_path), credentials_path=keys_path)
     try:
-        if market in {OVERSEAS_MARKET, NASDAQ_SURGE_MARKET}:
+        if market == OVERSEAS_MARKET:
             response = client.inquire_overseas_balance(
                 config.account_no,
                 config.product_code,
@@ -567,7 +562,7 @@ def load_kis_balance(market: str = DEFAULT_MARKET) -> dict:
             "holdings": [],
         }
     ok = parsed["rt_cd"] in {"0", ""}
-    if market in {OVERSEAS_MARKET, NASDAQ_SURGE_MARKET} and ok and balance_max_seed(parsed) <= 0:
+    if market == OVERSEAS_MARKET and ok and balance_max_seed(parsed) <= 0:
         parsed["rt_cd"] = "-1"
         parsed["msg_cd"] = "OVERSEAS_BALANCE_ZERO"
         parsed["message"] = _overseas_zero_balance_message(parsed)
@@ -698,12 +693,6 @@ def load_live_strategy_config(market: str = DEFAULT_MARKET, seed_capital: float 
     market = _market(market)
     if market == OVERSEAS_MARKET:
         path = OVERSEAS_SCANNER_CONFIG_PATH
-    elif market == NASDAQ_SURGE_MARKET:
-        path = NASDAQ_SURGE_SCANNER_CONFIG_PATH
-    elif market == DOMESTIC_SURGE_MARKET:
-        path = DOMESTIC_SURGE_SCANNER_CONFIG_PATH
-    elif market == DOMESTIC_ETF_MARKET:
-        path = DOMESTIC_ETF_SCANNER_CONFIG_PATH
     else:
         path = SCANNER_CONFIG_PATH
     if path.exists():
@@ -712,10 +701,9 @@ def load_live_strategy_config(market: str = DEFAULT_MARKET, seed_capital: float 
     reentry_block = config.stop_loss_reentry_block_minutes
     if reentry_block <= 0:
         reentry_block = 25 if market == OVERSEAS_MARKET else 20
-    adaptive_market_regime = False if market in {DOMESTIC_SURGE_MARKET, NASDAQ_SURGE_MARKET} else True
     config = replace(
         config,
-        adaptive_market_regime=adaptive_market_regime,
+        adaptive_market_regime=True,
         stop_loss_reentry_block_minutes=reentry_block,
     )
     if seed_capital and seed_capital > 0:
@@ -738,7 +726,7 @@ def auto_start_live_trader(market: str = DEFAULT_MARKET) -> dict:
 def auto_start_live_traders() -> dict[str, dict]:
     return {
         market: auto_start_live_trader(market)
-        for market in (DEFAULT_MARKET, OVERSEAS_MARKET, NASDAQ_SURGE_MARKET, DOMESTIC_SURGE_MARKET, DOMESTIC_ETF_MARKET)
+        for market in (DEFAULT_MARKET, OVERSEAS_MARKET)
     }
 
 
@@ -793,20 +781,11 @@ def _report_label(name: str, metrics: dict) -> str:
 def run(host: str = "127.0.0.1", port: int = 8000) -> None:
     ensure_live_report(live_report_dir(DEFAULT_MARKET), strategy_name="live_volatile_stock_scanner")
     ensure_live_report(live_report_dir(OVERSEAS_MARKET), strategy_name="live_overseas_stock_scanner")
-    ensure_live_report(live_report_dir(NASDAQ_SURGE_MARKET), strategy_name="live_nasdaq_surge_scalp")
-    ensure_live_report(live_report_dir(DOMESTIC_SURGE_MARKET), strategy_name="live_domestic_surge_scalp")
-    ensure_live_report(live_report_dir(DOMESTIC_ETF_MARKET), strategy_name="live_domestic_etf_scalp")
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     print(f"Dashboard running at http://{host}:{port}")
     auto_start_statuses = auto_start_live_traders()
     for market, auto_start_status in auto_start_statuses.items():
-        label = (
-            "해외" if market == OVERSEAS_MARKET
-            else "나스닥 급등주" if market == NASDAQ_SURGE_MARKET
-            else "국내 급등주" if market == DOMESTIC_SURGE_MARKET
-            else "국내ETF" if market == DOMESTIC_ETF_MARKET
-            else "국내"
-        )
+        label = "해외" if market == OVERSEAS_MARKET else "국내"
         if auto_start_status.get("running"):
             print(f"[live:{market}] {label} 자동매매 자동시작")
         elif load_live_config(market).auto_start:

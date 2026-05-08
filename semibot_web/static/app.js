@@ -16,9 +16,6 @@ const $ = (id) => document.getElementById(id);
 const markets = {
   domestic: { label: "국내", report: "live_trading", currency: "KRW" },
   overseas: { label: "해외", report: "live_trading_overseas", currency: "USD" },
-  nasdaq_surge: { label: "나스닥 급등주", report: "live_trading_nasdaq_surge", currency: "USD" },
-  domestic_surge: { label: "국내 급등주", report: "live_trading_domestic_surge", currency: "KRW" },
-  domestic_etf: { label: "국내ETF", report: "live_trading_domestic_etf", currency: "KRW" },
 };
 
 async function getJSON(url, options) {
@@ -364,12 +361,6 @@ async function saveLiveConfig(confirmAutoStart = true) {
   const seedText = config.seed_source === "balance_max" ? `잔고 최대 사용 (${marketMoney(config.seed_capital)} 예비값)` : marketMoney(config.seed_capital);
   const target = state.activeMarket === "overseas"
     ? `${config.overseas_premarket_enabled ? "프리장 포함 " : ""}NASDAQ 자동선별`
-    : state.activeMarket === "nasdaq_surge"
-      ? `${config.overseas_premarket_enabled ? "프리장 포함 " : ""}나스닥 급등주 자동선별`
-    : state.activeMarket === "domestic_surge"
-      ? "급등주 자동선별"
-    : state.activeMarket === "domestic_etf"
-      ? "1배 ETF 자동선별"
     : "시장 자동선별";
   $("liveStatus").textContent = `${marketLabel()} 설정 저장됨: ${config.mode}, 시드 ${seedText}, 동시보유 최대 ${config.max_positions || 3}종목, 자동시작 ${config.auto_start ? "켜짐" : "꺼짐"}, ${target}`;
   refreshBalance({ silent: true }).catch((error) => console.error(error));
@@ -634,7 +625,7 @@ function marketLabel() {
 }
 
 function marketCurrency(market = state.activeMarket) {
-  if (market === "overseas" || market === "nasdaq_surge") return "USD";
+  if (market === "overseas") return "USD";
   return "KRW";
 }
 
@@ -662,18 +653,12 @@ function renderMarketFields() {
   document.querySelectorAll(".overseas-only").forEach((element) => {
     element.hidden = !overseas;
   });
-  $("balanceTitle").textContent = overseas
-    ? state.activeMarket === "nasdaq_surge" ? "나스닥 급등주 계좌 잔고" : "해외계좌 잔고"
-    : state.activeMarket === "domestic_surge"
-      ? "국내 급등주 계좌 잔고"
-      : state.activeMarket === "domestic_etf"
-        ? "국내ETF 계좌 잔고"
-        : "실계좌 잔고";
+  $("balanceTitle").textContent = overseas ? "해외계좌 잔고" : "실계좌 잔고";
   $("startLiveButton").textContent = `${marketLabel()} 자동매매 시작`;
 }
 
 function isOverseasMarket(market = state.activeMarket) {
-  return market === "overseas" || market === "nasdaq_surge";
+  return market === "overseas";
 }
 
 async function switchMarket(market) {
