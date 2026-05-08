@@ -69,7 +69,9 @@ DOMESTIC_ETF_TRADE_VALUE_BY_SYMBOL: dict[str, float] = {
     "364970": 200_000_000.0,    # TIGER 바이오TOP10
 }
 DOMESTIC_ETF_DEFAULT_TRADE_VALUE = 200_000_000.0
-OVERSEAS_MIN_PRICE = 10.0
+OVERSEAS_MARKET_PROXY_SYMBOLS = ("QQQ",)
+OVERSEAS_MIN_PRICE = 20.0
+NASDAQ_SURGE_MIN_PRICE = 10.0
 OVERSEAS_MIN_TRADE_VALUE = 20_000_000.0
 OVERSEAS_PREMARKET_MIN_TRADE_VALUE = 2_000_000.0
 SYMBOL_REENTRY_BLOCK_MINUTES = 45
@@ -163,7 +165,7 @@ class LiveConfig:
         default_poll_interval = 5 if surge_market else DEFAULT_POLL_INTERVAL_SEC
         min_poll_interval = 5 if surge_market else DEFAULT_POLL_INTERVAL_SEC
         default_bar_minutes = 1 if surge_market else 5
-        default_max_positions = 1 if surge_market else 3
+        default_max_positions = 1 if surge_market or overseas_market else 3
         default_selection_refresh = 60 if surge_market else 300
         min_selection_refresh = 60 if surge_market else 300
         default_min_selection_hold = 180 if surge_market else 1800
@@ -229,6 +231,7 @@ class DirectEntryProfile:
     min_vwap_ratio: float = 0.995
     min_lookback_move: float = 0.001
     require_opening_breakout: bool = False
+    require_pullback_reclaim: bool = False
     max_setup_move: float | None = None
     max_extension_pct: float | None = None
     reason: str = "live_momentum_entry"
@@ -800,14 +803,16 @@ class LiveTrader:
         price = parsed["price"]
         if price <= 0:
             return False, "price<=0"
-        if _is_overseas_market(self.market) and price < OVERSEAS_MIN_PRICE:
+        if self.market == OVERSEAS_MARKET and price < OVERSEAS_MIN_PRICE:
             return False, f"price<{OVERSEAS_MIN_PRICE}"
+        if self.market == NASDAQ_SURGE_MARKET and price < NASDAQ_SURGE_MIN_PRICE:
+            return False, f"price<{NASDAQ_SURGE_MIN_PRICE}"
         setup_move = parsed["prev_rate_pct"] / 100.0
         if not (strategy.gap_min_pct <= setup_move <= strategy.gap_max_pct):
             return False, f"setup_move {setup_move * 100:.2f}%"
         range_available = parsed["high"] > 0 and parsed["low"] > 0 and parsed["high"] > parsed["low"]
         day_range = ((parsed["high"] - parsed["low"]) / price) if price and range_available else 0.0
-        if day_range < strategy.min_atr_pct and (range_available or not _is_overseas_market(self.market)):
+        if range_available and day_range < strategy.min_atr_pct:
             return False, f"range {day_range * 100:.2f}%"
         sources = set(row.get("_sources", []))
         symbol_for_threshold = str(row.get("stck_shrn_iscd") or row.get("symb") or "").strip().upper()
@@ -816,34 +821,39 @@ class LiveTrader:
         if self.market == NASDAQ_SURGE_MARKET:
             if range_available and day_range > strategy.max_atr_pct:
                 return False, f"range {day_range * 100:.2f}%"
-            volume_surge = _row_volume_surge(row)
-            if volume_surge < strategy.volume_factor and "volume_surge" not in sources:
+            volume_surge = _row_volume_surge_optional(row)
+            volume_ok = "volume_surge" in sources or (volume_surge is not None and volume_surge >= strategy.volume_factor)
+            strength = _row_strength_optional(row)
+            strength_ok = "strength" in sources or (strength is not None and strength >= NASDAQ_SURGE_MIN_STRENGTH)
+            source_confirmed = len(sources) >= 2
+            if volume_surge is not None and not volume_ok and not source_confirmed:
                 return False, f"volume {volume_surge:.2f}x"
-            strength = _row_strength(row)
-            if strength < NASDAQ_SURGE_MIN_STRENGTH and "strength" not in sources:
+            if strength is not None and not strength_ok and not volume_ok and not source_confirmed:
                 return False, f"strength {strength * 100:.0f}<130"
             if trade_value >= threshold or "trade_value" in sources:
-                return True, ""
+                if volume_ok or strength_ok or source_confirmed:
+                    return True, ""
+                return False, _activity_reject_reason(volume_surge, strength, NASDAQ_SURGE_MIN_STRENGTH)
             return False, f"value {trade_value:.0f}<{threshold:.0f}"
         if self.market == DOMESTIC_SURGE_MARKET:
             if _excluded_domestic_warning_row(row):
                 return False, "warning_stock"
-            if day_range > strategy.max_atr_pct:
+            if range_available and day_range > strategy.max_atr_pct:
                 return False, f"range {day_range * 100:.2f}%"
             spread_reason = _spread_reject_reason(parsed.get("spread_pct"), strategy)
             if spread_reason:
                 return False, spread_reason
             avg_volume = _float(row.get("avrg_vol"))
-            volume_surge = (parsed["volume"] / avg_volume) if avg_volume > 0 else _row_volume_surge(row)
-            strength = _row_strength(row)
-            volume_ok = volume_surge >= strategy.volume_factor or "volume_surge" in sources
-            strength_ok = strength >= DOMESTIC_SURGE_MIN_STRENGTH or "strength" in sources
+            volume_surge = (parsed["volume"] / avg_volume) if avg_volume > 0 else _row_volume_surge_optional(row)
+            strength = _row_strength_optional(row)
+            volume_ok = "volume_surge" in sources or (volume_surge is not None and volume_surge >= strategy.volume_factor)
+            strength_ok = "strength" in sources or (strength is not None and strength >= DOMESTIC_SURGE_MIN_STRENGTH)
             liquidity_ok = trade_value >= threshold or "trade_value" in sources
             if not liquidity_ok:
                 return False, f"value {trade_value:.0f}<{threshold:.0f}"
             if volume_ok or strength_ok or len(sources) >= 2:
                 return True, ""
-            return False, f"activity volume {volume_surge:.2f}x strength {strength * 100:.0f}<130"
+            return False, _activity_reject_reason(volume_surge, strength, DOMESTIC_SURGE_MIN_STRENGTH)
         if self.market == DOMESTIC_ETF_MARKET:
             if trade_value >= threshold or "trade_value" in sources:
                 return True, ""
@@ -862,8 +872,8 @@ class LiveTrader:
         gap = max(0.0, parsed["prev_rate_pct"] / 100.0)
         trade_value = max(parsed["value"], _row_trade_value(row), 1.0)
         avg_volume = _row_average_volume(row)
-        volume_surge = (parsed["volume"] / avg_volume) if avg_volume > 0 else max(0.0, _row_volume_surge(row))
-        strength = max(0.0, _row_strength(row))
+        volume_surge = (parsed["volume"] / avg_volume) if avg_volume > 0 else (_row_volume_surge_optional(row) or 0.0)
+        strength = _row_strength_optional(row) or 0.0
         source_bonus = _source_priority(row) * (0.35 if _is_overseas_market(self.market) else 0.0)
         return (math.log10(trade_value) * 1.5) + (gap * 100.0) + (day_range * 120.0) + min(volume_surge, 8.0) + strength + source_bonus
 
@@ -943,6 +953,10 @@ class LiveTrader:
                 symbols.insert(0, position_symbol)
         if self.market == DOMESTIC_ETF_MARKET:
             for proxy in DOMESTIC_ETF_INDEX_PROXIES:
+                if proxy not in symbols:
+                    symbols.append(proxy)
+        if self.market == OVERSEAS_MARKET:
+            for proxy in OVERSEAS_MARKET_PROXY_SYMBOLS:
                 if proxy not in symbols:
                     symbols.append(proxy)
         return symbols
@@ -1336,6 +1350,8 @@ class LiveTrader:
             return f"{strategy.entry_start_time} 전 신규 진입 대기"
         if now.time() >= strategy.entry_cutoff_clock:
             return f"{strategy.entry_cutoff_time or strategy.force_exit_time} 이후 신규 진입 중단"
+        if self.market == OVERSEAS_MARKET and self._market_session(now) == SESSION_REGULAR and not self._overseas_market_proxy_ok(now):
+            return "QQQ 시장 필터 미충족"
         if strategy.adaptive_market_regime and str(self.status.get("strategy_tone") or "").lower() == "conservative":
             return "보수 장세 신규 진입 중단"
         daily_return = self._daily_return(now)
@@ -1625,6 +1641,8 @@ class LiveTrader:
         current_bars = [bar for bar in symbol_bars if bar.session == now.date()]
         if len(current_bars) < profile.min_bars:
             return None
+        if self.market == OVERSEAS_MARKET and self._market_session(now) == SESSION_REGULAR and not self._overseas_market_proxy_ok(now):
+            return None
         latest = current_bars[-1]
         previous_close = _previous_close_for(symbol_bars, latest)
         if previous_close <= 0:
@@ -1671,6 +1689,8 @@ class LiveTrader:
         vwap = _latest_vwap(current_bars)
         if vwap > 0 and latest.close < vwap * profile.min_vwap_ratio:
             return None
+        if profile.require_pullback_reclaim and not _has_recent_pullback_reclaim(current_bars):
+            return None
         if self.market == DOMESTIC_ETF_MARKET and not self._domestic_etf_index_proxy_ok(now):
             return None
         if vwap > 0 and profile.max_extension_pct is not None and (latest.close / vwap) - 1.0 > profile.max_extension_pct:
@@ -1708,6 +1728,21 @@ class LiveTrader:
         if not proxy_states:
             return False
         return any(proxy_states)
+
+    def _overseas_market_proxy_ok(self, now: datetime) -> bool:
+        for proxy_symbol in OVERSEAS_MARKET_PROXY_SYMBOLS:
+            symbol_bars = sorted((bar for bar in self.bars if bar.symbol == proxy_symbol), key=lambda bar: bar.timestamp)
+            current_bars = [bar for bar in symbol_bars if bar.session == now.date()]
+            if len(current_bars) < 2:
+                continue
+            latest = current_bars[-1]
+            vwap = _latest_vwap(current_bars)
+            previous_close = _previous_close_for(symbol_bars, latest)
+            if vwap <= 0 or previous_close <= 0:
+                continue
+            if latest.close >= vwap and latest.close >= previous_close * 0.998:
+                return True
+        return False
 
     def _log_direct_entry_rejections(self, now: datetime, strategy: StockScannerConfig) -> None:
         if not self.active_symbols:
@@ -1769,6 +1804,7 @@ class LiveTrader:
                 min_vwap_ratio=1.0,
                 min_lookback_move=0.002,
                 require_opening_breakout=True,
+                require_pullback_reclaim=True,
                 max_extension_pct=strategy.max_extension_pct,
                 reason="live_overseas_momentum_entry",
             )
@@ -1875,7 +1911,10 @@ class LiveTrader:
                 take_profit_pct=max(self.strategy.take_profit_pct, 0.03),
                 trailing_stop_pct=max(self.strategy.trailing_stop_pct, 0.014),
                 daily_stop_loss_pct=min(self.strategy.daily_stop_loss_pct, 0.025),
-                max_trades_per_day=min(self.strategy.max_trades_per_day, 3),
+                max_trades_per_day=min(self.strategy.max_trades_per_day, 2),
+                partial_take_profit_pct=max(self.strategy.partial_take_profit_pct, 0.012),
+                partial_sell_ratio=0.5,
+                time_stop_minutes=max(self.strategy.time_stop_minutes, 45),
             )
         if self.market == OVERSEAS_MARKET and self.config.mode == "live":
             base = replace(
@@ -1883,7 +1922,10 @@ class LiveTrader:
                 observation_minutes=min(self.strategy.observation_minutes, 15),
                 volume_factor=max(1.25, self.strategy.volume_factor),
                 min_atr_pct=max(self.strategy.min_atr_pct, 0.004),
-                max_trades_per_day=min(self.strategy.max_trades_per_day, 6),
+                max_trades_per_day=min(self.strategy.max_trades_per_day, 2),
+                partial_take_profit_pct=max(self.strategy.partial_take_profit_pct, 0.012),
+                partial_sell_ratio=0.5,
+                time_stop_minutes=max(self.strategy.time_stop_minutes, 45),
             )
             tone = self._stable_tone(now, base)
             self._set_strategy_tone(tone)
@@ -2045,7 +2087,7 @@ class LiveTrader:
                 volume_factor=min(2.2, strategy.volume_factor + 0.3),
                 gap_min_pct=min(0.03, strategy.gap_min_pct + 0.003),
                 risk_per_trade_pct=max(0.004, strategy.risk_per_trade_pct * 0.7),
-                max_trades_per_day=max(3, min(strategy.max_trades_per_day, 5)),
+                max_trades_per_day=max(1, min(strategy.max_trades_per_day, 5)),
                 max_position_pct=max(0.2, strategy.max_position_pct * 0.75),
                 stop_loss_pct=max(strategy.stop_loss_pct, 0.011),
                 trailing_stop_pct=max(strategy.trailing_stop_pct, 0.012),
@@ -2060,6 +2102,9 @@ class LiveTrader:
         current_bars = [bar for bar in symbol_bars if bar.session == now.date()]
         if not current_bars:
             return f"오늘 {self.config.bar_minutes}분봉 수집 대기"
+        profile = self._direct_entry_profile(now, strategy)
+        if self.market == OVERSEAS_MARKET and self._market_session(now) == SESSION_REGULAR and not self._overseas_market_proxy_ok(now):
+            return "QQQ 시장 필터 미충족"
 
         latest = current_bars[-1]
         previous_close = _previous_close_for(symbol_bars, latest)
@@ -2118,6 +2163,8 @@ class LiveTrader:
             return "VWAP 계산 대기"
         if latest.close <= vwap:
             return "VWAP 아래"
+        if profile.require_pullback_reclaim and not _has_recent_pullback_reclaim(current_bars):
+            return "눌림 후 재돌파 대기"
 
         edge = strategy.round_trip_cost_rate + strategy.min_edge_rate
         opening_cutoff = session_start + timedelta(minutes=strategy.observation_minutes)
@@ -3068,13 +3115,49 @@ def _row_average_volume(row: dict[str, Any]) -> float:
 
 
 def _row_volume_surge(row: dict[str, Any]) -> float:
+    value = _row_volume_surge_optional(row)
+    return value or 0.0
+
+
+def _row_volume_surge_optional(row: dict[str, Any]) -> float | None:
     value = _first_row_float(row, ("vol_inrt", "vol_icdc_rate", "trdvol_inrt", "rate"))
+    if value <= 0:
+        return None
     return value / 100.0 if value > 20.0 else value
 
 
 def _row_strength(row: dict[str, Any]) -> float:
+    value = _row_strength_optional(row)
+    return value or 0.0
+
+
+def _has_recent_pullback_reclaim(current_bars: list[StockBar]) -> bool:
+    if len(current_bars) < 4:
+        return False
+    latest = current_bars[-1]
+    prior_bars = current_bars[-4:-1]
+    had_pullback = any(
+        prior_bars[idx].close < prior_bars[idx - 1].close or prior_bars[idx].low < prior_bars[idx - 1].close
+        for idx in range(1, len(prior_bars))
+    )
+    if not had_pullback:
+        return False
+    prior_high = max(bar.high for bar in prior_bars)
+    vwap = _latest_vwap(current_bars)
+    return latest.close > prior_high and (vwap <= 0 or latest.close >= vwap)
+
+
+def _row_strength_optional(row: dict[str, Any]) -> float | None:
     value = _first_row_float(row, ("tday_rltv", "volume_power", "powr", "pbid_rate"))
+    if value <= 0:
+        return None
     return value / 100.0 if value > 20.0 else value
+
+
+def _activity_reject_reason(volume_surge: float | None, strength: float | None, min_strength: float) -> str:
+    volume_text = "n/a" if volume_surge is None else f"{volume_surge:.2f}x"
+    strength_text = "n/a" if strength is None else f"{strength * 100:.0f}"
+    return f"activity volume {volume_text} strength {strength_text}<{min_strength * 100:.0f}"
 
 
 def _order_succeeded(response: dict[str, Any], live: bool) -> bool:

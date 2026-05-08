@@ -111,6 +111,7 @@ class LiveConfigTests(unittest.TestCase):
         self.assertEqual(config.currency, "USD")
         self.assertEqual(config.seed_capital, 10_000.0)
         self.assertEqual(config.clock_offset_hours, -7)
+        self.assertEqual(config.max_positions, 1)
         self.assertFalse(config.overseas_premarket_enabled)
 
     def test_overseas_premarket_can_be_enabled(self):
@@ -301,6 +302,20 @@ class LiveConfigTests(unittest.TestCase):
         self.assertEqual(strategy.observation_minutes, 30)
         self.assertLessEqual(strategy.max_position_pct, 0.5)
         self.assertGreaterEqual(strategy.volume_factor, 2.2)
+        self.assertLessEqual(strategy.max_trades_per_day, 2)
+        self.assertGreaterEqual(strategy.partial_take_profit_pct, 0.012)
+        self.assertGreaterEqual(strategy.time_stop_minutes, 45)
+
+    def test_overseas_live_strategy_uses_defensive_limits(self):
+        config = LiveConfig.from_dict({"market": "overseas", "mode": "live"})
+        trader = LiveTrader(config, StockScannerConfig(max_trades_per_day=6))
+
+        strategy = trader._active_strategy(datetime(2026, 4, 30, 10, 0))
+
+        self.assertEqual(config.max_positions, 1)
+        self.assertLessEqual(strategy.max_trades_per_day, 2)
+        self.assertGreaterEqual(strategy.partial_take_profit_pct, 0.012)
+        self.assertGreaterEqual(strategy.time_stop_minutes, 45)
 
     def test_domestic_live_strategy_is_more_active(self):
         trader = LiveTrader(LiveConfig(mode="live"), StockScannerConfig())
@@ -468,6 +483,15 @@ class LiveConfigTests(unittest.TestCase):
 
         self.assertEqual(selected, ["IREN"])
 
+    def test_nasdaq_surge_selector_keeps_liquid_multi_source_when_activity_fields_are_missing(self):
+        config = LiveConfig.from_dict({"market": "nasdaq_surge", "max_symbols": 2, "candidate_pool_size": 10})
+        strategy = StockScannerConfig(gap_min_pct=0.04, gap_max_pct=0.18, volume_factor=1.4, min_atr_pct=0.006, max_atr_pct=0.18)
+        trader = LiveTrader(config, strategy)
+
+        selected = trader._select_symbols(FakeNasdaqSurgeMissingActivityClient())
+
+        self.assertEqual(selected, ["IREN"])
+
     def test_domestic_etf_candidates_include_one_x_etfs_only(self):
         config = LiveConfig.from_dict({"market": "domestic_etf"})
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -497,6 +521,15 @@ class LiveConfigTests(unittest.TestCase):
         trader = LiveTrader(config, strategy)
 
         selected = trader._select_symbols(FakeDomesticSurgeNoStrengthClient())
+
+        self.assertEqual(selected, ["005930"])
+
+    def test_domestic_surge_selector_keeps_liquid_gap_when_day_range_is_missing(self):
+        config = LiveConfig.from_dict({"market": "domestic_surge", "max_symbols": 2, "candidate_pool_size": 10})
+        strategy = StockScannerConfig(gap_min_pct=0.03, gap_max_pct=0.12, volume_factor=1.2, min_atr_pct=0.002, max_atr_pct=0.12)
+        trader = LiveTrader(config, strategy)
+
+        selected = trader._select_symbols(FakeDomesticSurgeNoRangeClient())
 
         self.assertEqual(selected, ["005930"])
 
@@ -864,9 +897,14 @@ class LiveConfigTests(unittest.TestCase):
             trader.bars = [
                 StockBar("AAPL", start - timedelta(days=1), 100.0, 100.0, 100.0, 100.0, 1),
                 StockBar("AAPL", start, 101.0, 101.2, 100.8, 101.0, 1000),
-                StockBar("AAPL", start + timedelta(minutes=5), 101.0, 102.0, 100.9, 101.8, 1200),
-                StockBar("AAPL", start + timedelta(minutes=10), 101.8, 103.0, 101.7, 102.9, 1500),
-                StockBar("AAPL", start + timedelta(minutes=15), 102.9, 104.0, 102.8, 103.8, 2000),
+                StockBar("AAPL", start + timedelta(minutes=5), 101.0, 102.2, 100.9, 102.0, 1200),
+                StockBar("AAPL", start + timedelta(minutes=10), 102.0, 102.1, 101.2, 101.6, 1500),
+                StockBar("AAPL", start + timedelta(minutes=15), 101.6, 104.0, 101.5, 103.8, 2500),
+                StockBar("QQQ", start - timedelta(days=1), 400.0, 400.0, 400.0, 400.0, 1),
+                StockBar("QQQ", start, 401.0, 401.5, 400.7, 401.0, 1000),
+                StockBar("QQQ", start + timedelta(minutes=5), 401.0, 402.2, 400.9, 402.0, 1200),
+                StockBar("QQQ", start + timedelta(minutes=10), 402.0, 402.3, 401.2, 401.8, 1300),
+                StockBar("QQQ", start + timedelta(minutes=15), 401.8, 403.0, 401.7, 402.5, 1400),
             ]
             client = FakeOverseasOrderClient()
 
@@ -876,6 +914,46 @@ class LiveConfigTests(unittest.TestCase):
             self.assertEqual(client.orders[0]["symbol"], "AAPL")
             self.assertEqual(client.orders[0]["exchange_code"], "NASD")
             self.assertIn("live_overseas_momentum_entry", trader.snapshot()["trade_message"])
+
+    def test_overseas_regular_direct_entry_blocks_when_qqq_is_weak(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = replace(
+                StockScannerConfig(),
+                initial_capital=10_000,
+                observation_minutes=5,
+                gap_min_pct=0.003,
+                gap_max_pct=0.12,
+                volume_sma=2,
+                volume_factor=1.1,
+                max_extension_pct=0.05,
+                stop_loss_pct=0.012,
+            )
+            trader = LiveTrader(
+                LiveConfig.from_dict({"market": "overseas", "mode": "live", "account_no": "12345678"}),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            start = datetime(2026, 4, 30, 9, 30)
+            trader.active_symbols = ["AAPL"]
+            trader.cash = 10_000
+            trader.bars = [
+                StockBar("AAPL", start - timedelta(days=1), 100.0, 100.0, 100.0, 100.0, 1),
+                StockBar("AAPL", start, 101.0, 101.2, 100.8, 101.0, 1000),
+                StockBar("AAPL", start + timedelta(minutes=5), 101.0, 102.2, 100.9, 102.0, 1200),
+                StockBar("AAPL", start + timedelta(minutes=10), 102.0, 102.1, 101.2, 101.6, 1500),
+                StockBar("AAPL", start + timedelta(minutes=15), 101.6, 104.0, 101.5, 103.8, 2500),
+                StockBar("QQQ", start - timedelta(days=1), 400.0, 400.0, 400.0, 400.0, 1),
+                StockBar("QQQ", start, 399.0, 399.5, 398.0, 399.0, 1000),
+                StockBar("QQQ", start + timedelta(minutes=5), 399.0, 399.2, 397.5, 398.0, 1200),
+                StockBar("QQQ", start + timedelta(minutes=10), 398.0, 398.2, 396.5, 397.0, 1300),
+                StockBar("QQQ", start + timedelta(minutes=15), 397.0, 397.5, 395.8, 396.5, 1400),
+            ]
+            client = FakeOverseasOrderClient()
+
+            trader._evaluate(client, start + timedelta(minutes=16))
+
+            self.assertEqual(client.orders, [])
+            self.assertIn("QQQ 시장 필터", trader._symbol_entry_reason("AAPL", start + timedelta(minutes=16)))
 
     def test_overseas_premarket_direct_entry_uses_strict_profile(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1295,6 +1373,14 @@ class FakeNasdaqSurgeNoRangeClient(FakeNasdaqSurgeRankClient):
         }
 
 
+class FakeNasdaqSurgeMissingActivityClient(FakeNasdaqSurgeRankClient):
+    def overseas_volume_surge_rank(self, **kwargs):
+        return {"output2": []}
+
+    def overseas_volume_power_rank(self, **kwargs):
+        return {"output2": []}
+
+
 class WeakOverseasRankClient(FakeOverseasRankClient):
     def inquire_overseas_price(self, exchange_code, symbol):
         return {
@@ -1405,6 +1491,19 @@ class FakeDomesticSurgeNoStrengthClient:
                 "stck_oprc": "103000",
                 "stck_hgpr": "108000",
                 "stck_lwpr": "100000",
+                "acml_vol": "2000000",
+                "acml_tr_pbmn": "210000000000",
+                "prdy_ctrt": "6.0",
+            }
+        }
+
+
+class FakeDomesticSurgeNoRangeClient(FakeDomesticSurgeNoStrengthClient):
+    def inquire_price(self, symbol):
+        return {
+            "output": {
+                "stck_prpr": "106000",
+                "stck_oprc": "103000",
                 "acml_vol": "2000000",
                 "acml_tr_pbmn": "210000000000",
                 "prdy_ctrt": "6.0",

@@ -510,7 +510,7 @@ class StockScannerBacktester:
                 reason=reason,
             )
         )
-        return new_cash, 0.0
+        return new_cash, avg_cost if action == "SELL_PARTIAL" else 0.0
 
     def _metrics(self, bars: list[StockBar], trades: list[ScannerTrade], equity_curve: list[dict[str, Any]]) -> dict[str, Any]:
         final_equity = float(equity_curve[-1]["equity"])

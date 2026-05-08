@@ -43,6 +43,18 @@ class StockScannerBacktesterTest(unittest.TestCase):
 
         self.assertTrue(any(trade.action == "BUY" for trade in result.trades))
 
+    def test_partial_sell_keeps_remaining_average_cost(self) -> None:
+        config = StockScannerConfig(commission_bps=0.0, slippage_bps=0.0, sell_tax_bps=0.0)
+        backtester = StockScannerBacktester(config)
+        trades = []
+        bar = StockBar("AAA", datetime(2026, 1, 5, 10, 0), 110.0, 110.0, 110.0, 110.0, 1000)
+
+        cash, avg_cost = backtester._sell(bar, "SELL_PARTIAL", 50, 0.0, 100.0, trades, "partial_take_profit")
+
+        self.assertEqual(cash, 5500.0)
+        self.assertEqual(avg_cost, 100.0)
+        self.assertEqual(trades[0].realized_pnl, 500.0)
+
 
 def synthetic_bars() -> list[StockBar]:
     bars: list[StockBar] = []
