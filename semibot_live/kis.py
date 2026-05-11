@@ -282,6 +282,31 @@ class KisClient:
             tr_id="TTTC8434R" if live else "VTTC8434R",
         )
 
+    def inquire_psbl_order(
+        self,
+        account_no: str,
+        product_code: str = "01",
+        *,
+        symbol: str,
+        price: int | str = 0,
+        order_division: str = "01",
+        live: bool = True,
+    ) -> dict[str, Any]:
+        params = {
+            "CANO": account_no,
+            "ACNT_PRDT_CD": product_code,
+            "PDNO": symbol,
+            "ORD_UNPR": str(price),
+            "ORD_DVSN": order_division,
+            "CMA_EVLU_AMT_ICLD_YN": "N",
+            "OVRS_ICLD_YN": "N",
+        }
+        return self._request(
+            "GET",
+            f"/uapi/domestic-stock/v1/trading/inquire-psbl-order?{urlencode(params)}",
+            tr_id="TTTC8908R" if live else "VTTC8908R",
+        )
+
     def inquire_overseas_balance(
         self,
         account_no: str,
@@ -573,6 +598,40 @@ def parse_balance_response(data: dict[str, Any]) -> dict[str, Any]:
         "profit_loss": _first_float(summary, ("evlu_pfls_smtl_amt", "asst_icdc_amt")),
         "profit_loss_rate": _first_float(summary, ("evlu_pfls_rt", "asst_icdc_erng_rt")),
         "holdings": parsed_holdings,
+        "raw": data,
+    }
+
+
+def parse_domestic_psbl_order_response(data: dict[str, Any]) -> dict[str, Any]:
+    rows = _output_rows(data, ("output", "output1", "output2", "output3"))
+    return {
+        "rt_cd": str(data.get("rt_cd", "")),
+        "msg_cd": data.get("msg_cd", ""),
+        "message": data.get("msg1", ""),
+        "orderable_quantity": _first_present_float_by_groups(
+            rows,
+            (
+                ("nrcvb_buy_qty",),
+                ("ord_psbl_qty", "buy_psbl_qty"),
+                ("max_buy_qty",),
+            ),
+        ),
+        "orderable_cash": _first_present_float_by_groups(
+            rows,
+            (
+                ("nrcvb_buy_amt",),
+                ("ord_psbl_cash", "ord_psbl_amt", "buy_psbl_amt"),
+                ("max_buy_amt",),
+            ),
+        ),
+        "calculation_price": _first_present_float_by_groups(
+            rows,
+            (
+                ("psbl_qty_calc_unpr",),
+                ("ord_unpr", "ORD_UNPR"),
+            ),
+        ),
+        "debug_keys": _response_key_summary(data),
         "raw": data,
     }
 
@@ -927,6 +986,29 @@ def _first_float_from_rows(rows: list[dict[str, Any]], keys: tuple[str, ...]) ->
         if number != 0:
             return number
     return 0.0
+
+
+def _first_present_float_by_groups(
+    rows: list[dict[str, Any]],
+    key_groups: tuple[tuple[str, ...], ...],
+) -> float:
+    for keys in key_groups:
+        found, number = _first_present_float_from_rows(rows, keys)
+        if found:
+            return number
+    return 0.0
+
+
+def _first_present_float_from_rows(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> tuple[bool, float]:
+    for row in rows:
+        for key in keys:
+            if key not in row:
+                continue
+            value = row.get(key)
+            if value is None or str(value).strip() == "":
+                continue
+            return True, _float(value)
+    return False, 0.0
 
 
 def _first_float(data: dict[str, Any], keys: tuple[str, ...]) -> float:

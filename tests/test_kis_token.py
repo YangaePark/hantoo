@@ -112,6 +112,46 @@ class KisTokenTests(unittest.TestCase):
         self.assertEqual(parsed["total_evaluation"], 1_416_000)
         self.assertEqual(parsed["holdings"][0]["symbol"], "005930")
 
+    def test_domestic_psbl_order_response_prefers_cash_only_quantity(self):
+        from semibot_live.kis import parse_domestic_psbl_order_response
+
+        parsed = parse_domestic_psbl_order_response(
+            {
+                "rt_cd": "0",
+                "msg1": "정상",
+                "output": {
+                    "nrcvb_buy_qty": "0",
+                    "max_buy_qty": "9",
+                    "nrcvb_buy_amt": "0",
+                    "max_buy_amt": "900000",
+                    "psbl_qty_calc_unpr": "130000",
+                },
+            }
+        )
+
+        self.assertEqual(parsed["orderable_quantity"], 0)
+        self.assertEqual(parsed["orderable_cash"], 0)
+        self.assertEqual(parsed["calculation_price"], 130000)
+
+    def test_domestic_psbl_order_request_uses_market_order_query(self):
+        client = RecordingKisClient()
+
+        client.inquire_psbl_order(
+            "12345678",
+            "01",
+            symbol="005930",
+            price=0,
+            order_division="01",
+            live=True,
+        )
+
+        request = client.requests[0]
+        self.assertEqual(request["method"], "GET")
+        self.assertEqual(request["tr_id"], "TTTC8908R")
+        self.assertIn("/uapi/domestic-stock/v1/trading/inquire-psbl-order?", request["path"])
+        self.assertIn("PDNO=005930", request["path"])
+        self.assertIn("ORD_DVSN=01", request["path"])
+
     def test_domestic_price_response_parses_spread(self):
         from semibot_live.kis import parse_price_response
 

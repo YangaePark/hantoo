@@ -48,8 +48,8 @@ class WebDecisionLogTests(unittest.TestCase):
             (report_dir / "decision_log.jsonl").write_text(
                 "\n".join(
                     [
-                        json.dumps({"timestamp": "2026-05-04 09:10:00", "event": "cycle", "strategy_tone": "neutral"}),
-                        json.dumps({"timestamp": "2026-05-04 09:11:00", "event": "cycle", "strategy_tone": "conservative"}),
+                        json.dumps({"timestamp": "2026-05-04 09:10:00", "event": "cycle", "strategy_tone": "normal"}),
+                        json.dumps({"timestamp": "2026-05-04 09:11:00", "event": "cycle", "strategy_tone": "entry_block"}),
                         json.dumps({"timestamp": "2026-05-04 09:12:00", "event": "entry_skip", "reason": "stop_loss_reentry_cooldown"}),
                     ]
                 ),
@@ -64,7 +64,7 @@ class WebDecisionLogTests(unittest.TestCase):
                 server.REPORTS_ROOT = original_reports_root
 
             summary = data.get("tone_summary", {})
-            self.assertEqual(summary.get("latest_tone"), "conservative")
+            self.assertEqual(summary.get("latest_tone"), "entry_block")
             self.assertEqual(summary.get("tone_switches"), 1)
             self.assertEqual(summary.get("stop_loss_reentry_blocks"), 1)
             self.assertGreater(summary.get("estimated_avoided_loss", 0), 0)

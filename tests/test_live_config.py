@@ -301,9 +301,9 @@ class LiveConfigTests(unittest.TestCase):
 
         self.assertEqual(message, "국내 지수 필터 미충족")
 
-    def test_conservative_tone_blocks_adaptive_entries(self):
+    def test_entry_block_tone_blocks_adaptive_entries(self):
         trader = LiveTrader(LiveConfig(mode="paper"), StockScannerConfig())
-        trader.status["strategy_tone"] = "conservative"
+        trader.status["strategy_tone"] = "entry_block"
         strategy = StockScannerConfig(
             adaptive_market_regime=True,
             entry_start_time="09:00",
@@ -312,7 +312,7 @@ class LiveConfigTests(unittest.TestCase):
 
         message = trader._entry_risk_block(datetime(2026, 4, 30, 10, 0), strategy)
 
-        self.assertEqual(message, "보수 장세 신규 진입 중단")
+        self.assertEqual(message, "신규진입 차단")
 
     def test_same_symbol_reentry_waits_after_any_full_exit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -337,44 +337,40 @@ class LiveConfigTests(unittest.TestCase):
             self.assertFalse(allowed)
             self.assertIn("매도 후 재진입 대기", trader.snapshot()["trade_message"])
 
-    def test_market_tone_requires_long_confirm_before_aggressive(self):
+    def test_market_tone_stays_normal_in_strong_market(self):
         trader = LiveTrader(LiveConfig(mode="live"), StockScannerConfig())
         strategy = StockScannerConfig(adaptive_market_regime=True)
         start = datetime(2026, 4, 30, 9, 0)
         trader.active_symbols = ["000001", "000002", "000003"]
         trader.bars = _tone_bars(trader.active_symbols, start, [101.0, 101.0, 101.0])
 
-        self.assertEqual(trader._stable_tone(start, strategy), "neutral")
-        self.assertEqual(trader._stable_tone(start + timedelta(minutes=9), strategy), "neutral")
-        self.assertEqual(trader._stable_tone(start + timedelta(minutes=10), strategy), "aggressive")
+        self.assertEqual(trader._stable_tone(start, strategy), "normal")
+        self.assertEqual(trader._stable_tone(start + timedelta(minutes=9), strategy), "normal")
+        self.assertEqual(trader._stable_tone(start + timedelta(minutes=10), strategy), "normal")
 
-    def test_market_tone_respects_minimum_hold_time(self):
+    def test_market_tone_blocks_entries_after_weak_confirm(self):
         trader = LiveTrader(LiveConfig(mode="live"), StockScannerConfig())
         strategy = StockScannerConfig(adaptive_market_regime=True)
         start = datetime(2026, 4, 30, 9, 0)
         trader.active_symbols = ["000001", "000002", "000003"]
-        trader.bars = _tone_bars(trader.active_symbols, start, [101.0, 101.0, 101.0])
-        trader._stable_tone(start, strategy)
-        trader._stable_tone(start + timedelta(minutes=10), strategy)
-
         trader.bars = _tone_bars(trader.active_symbols, start, [100.1, 100.1, 100.1])
-        self.assertEqual(trader._stable_tone(start + timedelta(minutes=12), strategy), "aggressive")
-        self.assertEqual(trader._stable_tone(start + timedelta(minutes=15), strategy), "aggressive")
-        self.assertEqual(trader._stable_tone(start + timedelta(minutes=20), strategy), "conservative")
+        self.assertEqual(trader._stable_tone(start, strategy), "normal")
+        self.assertEqual(trader._stable_tone(start + timedelta(minutes=3), strategy), "normal")
+        self.assertEqual(trader._stable_tone(start + timedelta(minutes=4), strategy), "entry_block")
 
-    def test_market_tone_can_switch_to_conservative_near_daily_stop(self):
+    def test_market_tone_can_block_entries_near_daily_stop(self):
         trader = LiveTrader(LiveConfig(mode="live"), StockScannerConfig())
         strategy = StockScannerConfig(adaptive_market_regime=True, daily_stop_loss_pct=0.02)
         now = datetime(2026, 4, 30, 10, 0)
         trader.active_symbols = ["000001", "000002", "000003"]
         trader.bars = _tone_bars(trader.active_symbols, now, [100.1, 100.1, 100.1])
-        trader._tone_current = "aggressive"
+        trader._tone_current = "normal"
         trader._tone_current_since = now
         trader.day_state_date = now.date()
         trader.day_start_cash = 1000.0
         trader.cash = 981.0
 
-        self.assertEqual(trader._stable_tone(now, strategy), "conservative")
+        self.assertEqual(trader._stable_tone(now, strategy), "entry_block")
 
     def test_entry_wait_message_summarizes_all_active_symbol_reasons(self):
         strategy = replace(StockScannerConfig(), observation_minutes=20)
@@ -556,6 +552,47 @@ class LiveConfigTests(unittest.TestCase):
             self.assertIn("live_momentum_reclaim_entry", trader.snapshot()["trade_message"])
             logs = _read_decision_logs(Path(tmpdir))
             self.assertTrue(any(row["event"] == "order_submitted" and row["side"] == "buy" for row in logs))
+
+    def test_domestic_live_buy_caps_quantity_to_broker_market_orderable_qty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = StockScannerConfig(initial_capital=1_000_000)
+            trader = LiveTrader(
+                LiveConfig(mode="live", account_no="12345678"),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            now = datetime(2026, 4, 30, 9, 10)
+            trader.cash = 1_000_000
+            bar = StockBar("005930", now, 100000.0, 100000.0, 100000.0, 100000.0, 1)
+            client = FakeDomesticPsblOrderClient(orderable_quantity=7)
+
+            submitted = trader._submit_live_buy(client, now, strategy, bar, 9, "test_entry")
+
+            self.assertTrue(submitted)
+            self.assertEqual(client.psbl_requests[0]["symbol"], "005930")
+            self.assertEqual(client.psbl_requests[0]["order_division"], "01")
+            self.assertEqual(client.orders[0]["quantity"], 7)
+            logs = _read_decision_logs(Path(tmpdir))
+            self.assertTrue(any(row["event"] == "order_shares_capped" and row["capped_shares"] == 7 for row in logs))
+
+    def test_domestic_live_buy_skips_when_broker_orderable_qty_is_zero(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = StockScannerConfig(initial_capital=1_000_000)
+            trader = LiveTrader(
+                LiveConfig(mode="live", account_no="12345678"),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            now = datetime(2026, 4, 30, 9, 10)
+            trader.cash = 1_000_000
+            bar = StockBar("005930", now, 100000.0, 100000.0, 100000.0, 100000.0, 1)
+            client = FakeDomesticPsblOrderClient(orderable_quantity=0)
+
+            submitted = trader._submit_live_buy(client, now, strategy, bar, 9, "test_entry")
+
+            self.assertFalse(submitted)
+            self.assertEqual(client.orders, [])
+            self.assertIn("주문 가능 수량 없음", trader.snapshot()["trade_message"])
 
     def test_live_direct_entry_honors_daily_trade_limit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1225,6 +1262,26 @@ class FakeDomesticOrderClient:
     def order_cash(self, **kwargs):
         self.orders.append(kwargs)
         return {"rt_cd": "0", "msg1": "정상"}
+
+
+class FakeDomesticPsblOrderClient(FakeDomesticOrderClient):
+    def __init__(self, orderable_quantity):
+        super().__init__()
+        self.orderable_quantity = orderable_quantity
+        self.psbl_requests = []
+
+    def inquire_psbl_order(self, *args, **kwargs):
+        self.psbl_requests.append({"args": args, **kwargs})
+        return {
+            "rt_cd": "0",
+            "msg1": "정상",
+            "output": {
+                "nrcvb_buy_qty": str(self.orderable_quantity),
+                "nrcvb_buy_amt": str(self.orderable_quantity * 100000),
+                "psbl_qty_calc_unpr": "130000",
+                "max_buy_qty": "99",
+            },
+        }
 
 
 class FakeDomesticQuoteOrderClient(FakeDomesticOrderClient):

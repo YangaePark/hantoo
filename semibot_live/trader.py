@@ -14,7 +14,18 @@ from zoneinfo import ZoneInfo
 
 from semibot_backtester.stock_scanner import ScannerTrade, StockBar, StockScannerConfig, StockScannerBacktester
 
-from .kis import KisClient, KisCredentials, parse_balance_response, parse_order_response, parse_overseas_balance_response, parse_overseas_price_response, parse_price_response, parse_rank_rows, rank_row_symbol
+from .kis import (
+    KisClient,
+    KisCredentials,
+    parse_balance_response,
+    parse_domestic_psbl_order_response,
+    parse_order_response,
+    parse_overseas_balance_response,
+    parse_overseas_price_response,
+    parse_price_response,
+    parse_rank_rows,
+    rank_row_symbol,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,9 +75,8 @@ SESSION_PREMARKET = "premarket"
 SESSION_REGULAR = "regular"
 SESSION_CLOSED = "closed"
 TONE_MIN_HOLD_SECONDS = 10 * 60
-TONE_AGGRESSIVE_CONFIRM_SECONDS = 10 * 60
-TONE_CONSERVATIVE_CONFIRM_SECONDS = 4 * 60
-TONE_NEUTRAL_CONFIRM_SECONDS = 6 * 60
+TONE_ENTRY_BLOCK_CONFIRM_SECONDS = 4 * 60
+TONE_NORMAL_CONFIRM_SECONDS = 6 * 60
 TONE_URGENT_STOP_RATIO = 0.75
 TONE_EXTREME_WEAK_MOVE = -0.006
 TONE_EXTREME_WEAK_BREADTH = 0.25
@@ -181,7 +191,7 @@ class DirectEntryProfile:
 
 @dataclass(frozen=True)
 class MarketToneSignal:
-    tone: str = "neutral"
+    tone: str = "normal"
     avg_move: float = 0.0
     breadth: float = 0.0
     sample_count: int = 0
@@ -235,16 +245,16 @@ class LiveTrader:
             "token_status": "대기",
             "token_expires_at": "",
             "trade_message": "매수 조건 대기",
-            "strategy_tone": "neutral",
+            "strategy_tone": "normal",
             "strategy_profile_mode": "auto" if strategy.adaptive_market_regime else "fixed",
         }
         self.bars: list[StockBar] = []
         self.seeded_previous_close: dict[str, object] = {}
         self.last_cumulative_volume: dict[tuple[str, object], int] = {}
         self._error_streak: int = 0
-        self._tone_current: str = "neutral"
+        self._tone_current: str = "normal"
         self._tone_current_since: datetime | None = None
-        self._tone_pending: str = "neutral"
+        self._tone_pending: str = "normal"
         self._tone_pending_since: datetime | None = None
         self._tone_pending_count: int = 0
         self.active_symbols: list[str] = []
@@ -375,7 +385,7 @@ class LiveTrader:
             "cycle",
             strategy_now,
             session=session,
-            strategy_tone=str(self.status.get("strategy_tone", "neutral")),
+            strategy_tone=str(self.status.get("strategy_tone", "normal")),
             active_symbols=list(self.active_symbols),
             position=self.position or {},
             positions=[dict(position) for position in self.positions],
@@ -1166,8 +1176,8 @@ class LiveTrader:
             return "국내 지수 필터 미충족"
         if self.market == OVERSEAS_MARKET and self._market_session(now) == SESSION_REGULAR and not self._overseas_market_proxy_ok(now):
             return "QQQ 시장 필터 미충족"
-        if strategy.adaptive_market_regime and str(self.status.get("strategy_tone") or "").lower() == "conservative":
-            return "보수 장세 신규 진입 중단"
+        if strategy.adaptive_market_regime and str(self.status.get("strategy_tone") or "").lower() == "entry_block":
+            return "신규진입 차단"
         daily_return = self._daily_return(now)
         if strategy.daily_take_profit_pct > 0 and daily_return >= strategy.daily_take_profit_pct:
             return f"일일 목표 도달 ({daily_return * 100:.2f}%)"
@@ -1298,6 +1308,9 @@ class LiveTrader:
             self._set_trade_message(f"{bar.symbol}: 주문 가능 수량 없음")
             self._log_decision("entry_skip", now, symbol=bar.symbol, reason="no_orderable_shares", price=bar.close)
             return False
+        shares = self._cap_domestic_orderable_buy_shares(client, now, bar.symbol, shares)
+        if shares <= 0:
+            return False
         response = self._place_order(client, "buy", bar.symbol, shares, live=True, price=bar.close)
         if not _order_succeeded(response, True):
             self._set_trade_message(f"주문 실패: BUY {bar.symbol} ({_order_message(response)})")
@@ -1362,6 +1375,58 @@ class LiveTrader:
             self.status["orders"] = int(self.status.get("orders", 0)) + 1
             self.status["trade_message"] = f"최근 주문: BUY {trade.symbol} {trade.shares}주 ({trade.reason})"
         return True
+
+    def _cap_domestic_orderable_buy_shares(self, client: KisClient, now: datetime, symbol: str, shares: int) -> int:
+        if self.market != DEFAULT_MARKET or self.config.mode != "live":
+            return shares
+        inquire_psbl_order = getattr(client, "inquire_psbl_order", None)
+        if not callable(inquire_psbl_order):
+            return shares
+        try:
+            response = inquire_psbl_order(
+                self.config.account_no,
+                self.config.product_code,
+                symbol=symbol,
+                price=0,
+                order_division="01",
+                live=True,
+            )
+        except Exception as exc:
+            message = f"{symbol}: 주문 가능 수량 확인 실패 ({exc})"
+            self._set_trade_message(message)
+            self._log_decision("entry_skip", now, symbol=symbol, reason="orderable_check_error", error=str(exc))
+            return 0
+        parsed = parse_domestic_psbl_order_response(response)
+        if str(parsed.get("rt_cd", "")) not in {"0", ""}:
+            message = _order_message(response) or str(parsed.get("message") or "주문 가능 수량 확인 실패")
+            self._set_trade_message(f"{symbol}: 주문 가능 수량 확인 실패 ({message})")
+            self._log_decision("entry_skip", now, symbol=symbol, reason="orderable_check_failed", response=response)
+            return 0
+        orderable_quantity = int(parsed.get("orderable_quantity") or 0)
+        if orderable_quantity <= 0:
+            self._set_trade_message(f"{symbol}: 주문 가능 수량 없음")
+            self._log_decision(
+                "entry_skip",
+                now,
+                symbol=symbol,
+                reason="no_broker_orderable_shares",
+                requested_shares=shares,
+                orderable=response,
+            )
+            return 0
+        capped_shares = min(shares, orderable_quantity)
+        if capped_shares < shares:
+            self._log_decision(
+                "order_shares_capped",
+                now,
+                symbol=symbol,
+                requested_shares=shares,
+                capped_shares=capped_shares,
+                orderable_quantity=orderable_quantity,
+                orderable_cash=parsed.get("orderable_cash"),
+                calculation_price=parsed.get("calculation_price"),
+            )
+        return capped_shares
 
     def _submit_live_sell(
         self,
@@ -1636,7 +1701,7 @@ class LiveTrader:
 
     def _active_strategy(self, now: datetime) -> StockScannerConfig:
         if self.market == OVERSEAS_MARKET and self._market_session(now) == SESSION_PREMARKET:
-            self._set_strategy_tone("premarket")
+            self._set_strategy_tone("normal")
             return replace(
                 self.strategy,
                 observation_minutes=30,
@@ -1674,7 +1739,7 @@ class LiveTrader:
             )
             tone = self._stable_tone(now, base)
             self._set_strategy_tone(tone)
-            return self._strategy_by_tone(base, tone)
+            return base
         if self.market == DEFAULT_MARKET and self.config.mode == "live":
             base = replace(
                 self.strategy,
@@ -1697,8 +1762,8 @@ class LiveTrader:
             )
             tone = self._stable_tone(now, base)
             self._set_strategy_tone(tone)
-            return self._strategy_by_tone(base, tone)
-        self._set_strategy_tone("neutral")
+            return base
+        self._set_strategy_tone("normal")
         return self.strategy
 
     def _set_strategy_tone(self, tone: str) -> None:
@@ -1706,7 +1771,7 @@ class LiveTrader:
             self.status["strategy_tone"] = tone
 
     def _stable_tone(self, now: datetime, strategy: StockScannerConfig) -> str:
-        """시간 기반 히스테리시스 적용 톤. 공격 전환은 느리게, 방어 전환은 빠르게 확인한다."""
+        """시간 기반 히스테리시스 적용 진입 게이트. 차단 전환은 빠르게, 정상 복귀는 천천히 확인한다."""
         signal = self._market_tone_signal(now, strategy)
         raw = signal.tone
         if self._tone_current_since is None:
@@ -1721,8 +1786,8 @@ class LiveTrader:
             self._tone_pending_since = now
         if raw == self._tone_current:
             return self._tone_current
-        if self._urgent_conservative_signal(now, strategy, signal):
-            return self._commit_tone("conservative", now)
+        if self._urgent_entry_block_signal(now, strategy, signal):
+            return self._commit_tone("entry_block", now)
         held_seconds = (now - self._tone_current_since).total_seconds()
         pending_seconds = (now - self._tone_pending_since).total_seconds()
         if held_seconds < TONE_MIN_HOLD_SECONDS:
@@ -1767,12 +1832,10 @@ class LiveTrader:
             return MarketToneSignal(sample_count=sample_count)
         avg_move = sum(move_samples) / sample_count
         breadth = above_vwap / sample_count
-        if avg_move >= 0.006 and breadth >= 0.6:
-            tone = "aggressive"
-        elif avg_move <= 0.0015 or breadth < 0.45:
-            tone = "conservative"
+        if avg_move <= 0.0015 or breadth < 0.45:
+            tone = "entry_block"
         else:
-            tone = "neutral"
+            tone = "normal"
         return MarketToneSignal(tone=tone, avg_move=avg_move, breadth=breadth, sample_count=sample_count)
 
     def _commit_tone(self, tone: str, now: datetime) -> str:
@@ -1781,8 +1844,8 @@ class LiveTrader:
             self._tone_current_since = now
         return self._tone_current
 
-    def _urgent_conservative_signal(self, now: datetime, strategy: StockScannerConfig, signal: MarketToneSignal) -> bool:
-        if signal.tone != "conservative":
+    def _urgent_entry_block_signal(self, now: datetime, strategy: StockScannerConfig, signal: MarketToneSignal) -> bool:
+        if signal.tone != "entry_block":
             return False
         if signal.sample_count >= 3 and signal.avg_move <= TONE_EXTREME_WEAK_MOVE and signal.breadth <= TONE_EXTREME_WEAK_BREADTH:
             return True
@@ -1791,30 +1854,6 @@ class LiveTrader:
             if self._daily_return(now) <= -(strategy.daily_stop_loss_pct * TONE_URGENT_STOP_RATIO):
                 return True
         return False
-
-    def _strategy_by_tone(self, strategy: StockScannerConfig, tone: str) -> StockScannerConfig:
-        if tone == "aggressive":
-            return replace(
-                strategy,
-                volume_factor=max(1.1, strategy.volume_factor - 0.15),
-                gap_min_pct=max(0.0, strategy.gap_min_pct - 0.002),
-                risk_per_trade_pct=min(0.015, strategy.risk_per_trade_pct * 1.15),
-                max_trades_per_day=strategy.max_trades_per_day,
-                max_position_pct=min(1.0, strategy.max_position_pct * 1.1),
-            )
-        if tone == "conservative":
-            return replace(
-                strategy,
-                entry_start_time=_add_minutes_to_clock(strategy.entry_start_clock, 20),
-                volume_factor=min(2.2, strategy.volume_factor + 0.3),
-                gap_min_pct=min(0.03, strategy.gap_min_pct + 0.003),
-                risk_per_trade_pct=max(0.004, strategy.risk_per_trade_pct * 0.7),
-                max_trades_per_day=max(1, min(strategy.max_trades_per_day, 5)),
-                max_position_pct=max(0.2, strategy.max_position_pct * 0.75),
-                stop_loss_pct=max(strategy.stop_loss_pct, 0.011),
-                trailing_stop_pct=max(strategy.trailing_stop_pct, 0.012),
-            )
-        return strategy
 
     def _symbol_entry_reason(self, symbol: str, now: datetime) -> str:
         strategy = self._active_strategy(now)
@@ -2356,11 +2395,9 @@ def _daily_entry_limit_message(entry_count: int, max_trades_per_day: int) -> str
 
 
 def _tone_confirm_seconds(tone: str) -> int:
-    if tone == "aggressive":
-        return TONE_AGGRESSIVE_CONFIRM_SECONDS
-    if tone == "conservative":
-        return TONE_CONSERVATIVE_CONFIRM_SECONDS
-    return TONE_NEUTRAL_CONFIRM_SECONDS
+    if tone == "entry_block":
+        return TONE_ENTRY_BLOCK_CONFIRM_SECONDS
+    return TONE_NORMAL_CONFIRM_SECONDS
 
 
 def _max_positions_message(position_count: int, max_positions: int) -> str:
@@ -2501,7 +2538,7 @@ def _idle_status(market: str = DEFAULT_MARKET) -> dict[str, Any]:
         "token_status": "대기",
         "token_expires_at": "",
         "trade_message": "자동매매 시작 전",
-        "strategy_tone": "neutral",
+        "strategy_tone": "normal",
         "strategy_profile_mode": "auto",
     }
 
@@ -2858,12 +2895,6 @@ def _first_row_float(row: dict[str, Any], keys: tuple[str, ...]) -> float:
         if number:
             return number
     return 0.0
-
-
-def _add_minutes_to_clock(value: clock_time, minutes: int) -> str:
-    base = datetime.combine(datetime.now().date(), value)
-    shifted = base + timedelta(minutes=minutes)
-    return shifted.strftime("%H:%M")
 
 
 def _float(value: object) -> float:

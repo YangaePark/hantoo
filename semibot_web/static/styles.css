@@ -349,22 +349,19 @@ h1 {
   border: 1px solid transparent;
 }
 
+.tone-badge.normal,
+.tone-badge.neutral,
 .tone-badge.aggressive {
-  color: #8a2100;
-  background: #ffe6db;
-  border-color: #ffc8b0;
-}
-
-.tone-badge.neutral {
   color: #12407a;
   background: #e5f0ff;
   border-color: #b8d2ff;
 }
 
+.tone-badge.entry_block,
 .tone-badge.conservative {
-  color: #165c2f;
-  background: #e4f7ea;
-  border-color: #bceac9;
+  color: #7a2d12;
+  background: #ffe9df;
+  border-color: #ffc9b3;
 }
 
 .tone-badge.premarket {

@@ -248,7 +248,7 @@ def _build_tone_summary(report_dir: Path, trades: list[dict]) -> dict:
     decision_path = report_dir / "decision_log.jsonl"
     if not decision_path.exists():
         return {
-            "latest_tone": "neutral",
+            "latest_tone": "normal",
             "tone_switches": 0,
             "tone_counts": {},
             "stop_loss_reentry_blocks": 0,
@@ -268,12 +268,12 @@ def _build_tone_summary(report_dir: Path, trades: list[dict]) -> dict:
                 continue
 
     tone_counts: dict[str, int] = {}
-    latest_tone = "neutral"
+    latest_tone = "normal"
     previous_tone = ""
     switches = 0
     profile_mode = "auto"
     for row in decisions:
-        tone = str(row.get("strategy_tone") or "").strip().lower()
+        tone = _normalize_tone(row.get("strategy_tone"))
         if not tone:
             continue
         tone_counts[tone] = tone_counts.get(tone, 0) + 1
@@ -307,6 +307,15 @@ def _build_tone_summary(report_dir: Path, trades: list[dict]) -> dict:
         "estimated_avoided_loss": estimated_avoided_loss,
         "profile_mode": profile_mode,
     }
+
+
+def _normalize_tone(value: object) -> str:
+    tone = str(value or "").strip().lower()
+    if not tone:
+        return ""
+    if tone in {"entry_block", "conservative"}:
+        return "entry_block"
+    return "normal"
 
 
 def load_live_decisions(market: str = DEFAULT_MARKET, limit: int = 80) -> dict:
