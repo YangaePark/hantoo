@@ -4,6 +4,8 @@ import json
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from semibot_backtester.stock_scanner import StockBar, StockScannerConfig
 from semibot_live.trader import (
@@ -288,6 +290,7 @@ class LiveConfigTests(unittest.TestCase):
         self.assertLessEqual(strategy.gap_min_pct, 0.008)
         self.assertLessEqual(strategy.volume_factor, 1.3)
         self.assertLessEqual(strategy.max_trades_per_day, 3)
+        self.assertGreaterEqual(strategy.min_edge_bps, 35.0)
         self.assertGreaterEqual(strategy.loss_cooldown_minutes, 60)
         self.assertGreaterEqual(strategy.partial_take_profit_pct, 0.012)
 
@@ -464,6 +467,68 @@ class LiveConfigTests(unittest.TestCase):
             self.assertEqual(metrics["final_equity"], 200_000)
             self.assertEqual(metrics["total_return_pct"], 0.0)
             self.assertIn("2026-04-30 10:00", (report_dir / "equity_curve.csv").read_text(encoding="utf-8"))
+
+    def test_live_ignores_backtester_sell_signal_for_live_exit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            now = datetime(2026, 4, 30, 10, 0)
+            trader = LiveTrader(
+                LiveConfig(mode="live", account_no="12345678", min_bars_before_evaluate=1),
+                StockScannerConfig(entry_start_time="09:00", entry_cutoff_time="15:00"),
+                report_dir=Path(tmpdir),
+            )
+            trader.position = {
+                "symbol": "005930",
+                "shares": 10,
+                "entry_price": 100.0,
+                "highest_price": 100.5,
+                "entry_time": (now - timedelta(minutes=10)).isoformat(sep=" "),
+            }
+            trader.bars = [StockBar("005930", now, 100.5, 100.6, 100.2, 100.5, 1000)]
+            fake_trade = SimpleNamespace(
+                timestamp=now,
+                action="SELL",
+                symbol="005930",
+                shares=10,
+                price=100.5,
+                reason="backtest_stop_loss",
+            )
+            fake_result = SimpleNamespace(metrics={}, trades=[fake_trade], equity_curve=[])
+            client = FakeDomesticOrderClient()
+
+            with patch("semibot_live.trader.StockScannerBacktester") as backtester:
+                backtester.return_value.run.return_value = fake_result
+                trader._evaluate(client, now)
+
+            self.assertEqual(client.orders, [])
+            self.assertIsNotNone(trader.position)
+            self.assertIn("실시간 청산 조건 대기", trader.snapshot()["trade_message"])
+
+    def test_live_buy_keeps_estimated_cash_when_balance_cash_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = StockScannerConfig(initial_capital=1_000_000)
+            trader = LiveTrader(
+                LiveConfig(mode="live", account_no="12345678"),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            now = datetime(2026, 4, 30, 9, 10)
+            trader.cash = 1_000_000
+            bar = StockBar("005930", now, 100.0, 101.0, 99.0, 100.0, 1000)
+            client = FakeDomesticBalanceOrderClient(
+                cash=1_000_000,
+                holdings=[{"pdno": "005930", "hldg_qty": "8", "pchs_avg_pric": "101"}],
+            )
+
+            submitted = trader._submit_live_buy(client, now, strategy, bar, 10, "test_entry")
+
+            expected_cash = round(1_000_000 - (8 * 101.0) - (8 * 101.0 * (strategy.commission_rate + strategy.slippage_rate)), 2)
+            row = trader._live_equity_row(now)
+            self.assertTrue(submitted)
+            self.assertEqual(trader.positions[0]["shares"], 8)
+            self.assertEqual(trader.positions[0]["entry_price"], 101.0)
+            self.assertEqual(trader.cash, expected_cash)
+            self.assertEqual(row["cash"], expected_cash)
+            self.assertEqual(row["equity"], round(expected_cash + (8 * 101.0), 2))
 
     def test_regular_session_resets_premarket_bars_when_flat(self):
         config = LiveConfig.from_dict({"market": "overseas", "overseas_premarket_enabled": True})
@@ -812,14 +877,14 @@ class LiveConfigTests(unittest.TestCase):
                 StockBar("NVDA", start + timedelta(minutes=20), 102.3, 103.0, 102.1, 102.7, 1000),
                 StockBar("NVDA", start + timedelta(minutes=25), 102.7, 103.2, 102.5, 103.0, 1000),
                 StockBar("NVDA", start + timedelta(minutes=30), 103.0, 105.5, 103.0, 105.2, 2600),
-                StockBar("NVDA", start + timedelta(minutes=35), 105.2, 106.4, 105.1, 106.0, 3600),
+                StockBar("NVDA", start + timedelta(minutes=35), 105.2, 106.6, 105.1, 106.4, 3600),
             ]
             client = FakeOverseasOrderClient()
 
             trader._try_live_direct_entry(client, start + timedelta(minutes=36), strategy, {}, [])
 
             self.assertEqual(len(client.orders), 1)
-            self.assertLessEqual(client.orders[0]["quantity"] * 106.0, 5_000)
+            self.assertLessEqual(client.orders[0]["quantity"] * 106.4, 5_000)
             self.assertIn("live_premarket_momentum_entry", trader.snapshot()["trade_message"])
 
     def test_overseas_premarket_direct_entry_rejects_weak_breakout(self):
@@ -869,6 +934,58 @@ class LiveConfigTests(unittest.TestCase):
             self.assertIn("live_stop_loss", trader.snapshot()["trade_message"])
             logs = _read_decision_logs(Path(tmpdir))
             self.assertTrue(any(row["event"] == "order_submitted" and row["side"] == "sell" for row in logs))
+
+    def test_live_direct_exit_defers_stop_during_entry_grace(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = replace(StockScannerConfig(), initial_capital=1_000_000, stop_loss_pct=0.01)
+            trader = LiveTrader(
+                LiveConfig(mode="live", account_no="12345678"),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            now = datetime(2026, 4, 30, 10, 0)
+            trader.position = {
+                "symbol": "005930",
+                "shares": 10,
+                "entry_price": 100.0,
+                "highest_price": 100.0,
+                "entry_time": (now - timedelta(seconds=30)).isoformat(sep=" "),
+            }
+            trader.bars = [StockBar("005930", now, 99.0, 99.0, 98.5, 98.8, 1000)]
+            client = FakeDomesticOrderClient()
+
+            sold = trader._try_live_direct_exit(client, now, strategy)
+
+            self.assertFalse(sold)
+            self.assertEqual(client.orders, [])
+            self.assertIsNotNone(trader.position)
+
+    def test_live_sell_keeps_estimated_cash_when_balance_cash_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy = replace(StockScannerConfig(), initial_capital=1_000_000, stop_loss_pct=0.01, take_profit_pct=0.005)
+            trader = LiveTrader(
+                LiveConfig(mode="live", account_no="12345678"),
+                strategy,
+                report_dir=Path(tmpdir),
+            )
+            now = datetime(2026, 4, 30, 10, 0)
+            trader.cash = 900_000
+            trader.position = {
+                "symbol": "005930",
+                "shares": 10,
+                "entry_price": 100.0,
+                "highest_price": 101.0,
+                "entry_time": (now - timedelta(minutes=10)).isoformat(sep=" "),
+            }
+            trader.bars = [StockBar("005930", now, 101.0, 101.2, 100.9, 101.0, 1000)]
+            client = FakeDomesticBalanceOrderClient(cash=900_000, holdings=[])
+
+            sold = trader._try_live_direct_exit(client, now, strategy)
+
+            expected_cash = round(900_000 + (10 * 101.0) - (10 * 101.0 * (strategy.commission_rate + strategy.sell_tax_rate + strategy.slippage_rate)), 2)
+            self.assertTrue(sold)
+            self.assertIsNone(trader.position)
+            self.assertEqual(trader.cash, expected_cash)
 
     def test_live_direct_exit_ignores_pre_entry_low_on_entry_bar(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1281,6 +1398,22 @@ class FakeDomesticPsblOrderClient(FakeDomesticOrderClient):
                 "psbl_qty_calc_unpr": "130000",
                 "max_buy_qty": "99",
             },
+        }
+
+
+class FakeDomesticBalanceOrderClient(FakeDomesticOrderClient):
+    def __init__(self, cash, holdings):
+        super().__init__()
+        self.cash = cash
+        self.holdings = holdings
+
+    def inquire_balance(self, **kwargs):
+        _ = kwargs
+        return {
+            "rt_cd": "0",
+            "msg1": "정상",
+            "output1": self.holdings,
+            "output2": {"dnca_tot_amt": str(self.cash), "prvs_rcdl_excc_amt": str(self.cash)},
         }
 
 

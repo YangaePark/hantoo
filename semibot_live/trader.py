@@ -80,6 +80,8 @@ TONE_NORMAL_CONFIRM_SECONDS = 6 * 60
 TONE_URGENT_STOP_RATIO = 0.75
 TONE_EXTREME_WEAK_MOVE = -0.006
 TONE_EXTREME_WEAK_BREADTH = 0.25
+LIVE_STOP_GRACE_SECONDS = 60
+DOMESTIC_LIVE_MIN_EDGE_BPS = 35.0
 
 
 @dataclass
@@ -917,31 +919,9 @@ class LiveTrader:
             }
         else:
             if live:
-                position = self._position_for_symbol(latest_trade.symbol)
-                if not position:
-                    self._set_trade_message(f"{latest_trade.symbol}: 매도 신호가 있으나 보유 없음")
-                    return
-                bar = _latest_symbol_bar(self.bars, latest_trade.symbol, now.date()) or StockBar(
-                    latest_trade.symbol,
-                    latest_trade.timestamp,
-                    latest_trade.price,
-                    latest_trade.price,
-                    latest_trade.price,
-                    latest_trade.price,
-                    1,
-                )
-                if self._submit_live_sell(
-                    client,
-                    now,
-                    strategy,
-                    position,
-                    bar,
-                    latest_trade.reason,
-                    trade_timestamp=latest_trade.timestamp,
-                ):
-                    if self.config.mode != "live":
-                        _write_live_equity(result.equity_curve, self.report_dir)
-                        _write_live_metrics(result.metrics, self.report_dir)
+                held = self._position_for_symbol(latest_trade.symbol)
+                message = f"{latest_trade.symbol}: 실시간 청산 조건 대기" if held else self._entry_wait_message(now)
+                self._set_trade_message(message)
                 return
             response = self._place_order(client, "sell", latest_trade.symbol, latest_trade.shares, live, latest_trade.price)
             if not _order_succeeded(response, live):
@@ -1265,13 +1245,17 @@ class LiveTrader:
         partial_threshold = strategy.partial_take_profit_pct * (stages + 1)
         break_even_protected = stages > 0
         stop_price = entry_price if break_even_protected else entry_price * (1.0 - strategy.stop_loss_pct)
+        held_seconds = _position_held_seconds(position, now)
+        in_stop_grace = held_seconds is not None and held_seconds < LIVE_STOP_GRACE_SECONDS
+        emergency_stop_price = entry_price * (1.0 - (strategy.stop_loss_pct * 2.0))
+        stop_allowed = not in_stop_grace or effective_low <= emergency_stop_price
         reason = ""
         entry_date = _position_entry_date(position)
         if entry_date and latest.session > entry_date:
             reason = "live_overnight_force_exit"
         elif now.time() >= strategy.force_exit_clock:
             reason = "live_force_exit"
-        elif effective_low <= stop_price:
+        elif effective_low <= stop_price and stop_allowed:
             reason = "live_break_even_stop" if break_even_protected else "live_stop_loss"
         elif (
             strategy.partial_take_profit_pct > 0
@@ -1283,7 +1267,7 @@ class LiveTrader:
             return self._submit_live_sell(client, now, strategy, position, latest, "live_partial_take_profit", shares_to_sell=partial_shares)
         elif effective_high >= entry_price * (1.0 + strategy.take_profit_pct):
             reason = "live_take_profit"
-        elif highest_price > entry_price and effective_low <= highest_price * (1.0 - strategy.trailing_stop_pct):
+        elif not in_stop_grace and highest_price > entry_price and effective_low <= highest_price * (1.0 - strategy.trailing_stop_pct):
             reason = "live_trailing_stop"
         elif strategy.time_stop_minutes > 0 and _position_held_minutes(position, now) >= strategy.time_stop_minutes:
             reason = "live_time_stop"
@@ -1320,6 +1304,7 @@ class LiveTrader:
         gross = shares * bar.close
         cost = gross * (strategy.commission_rate + strategy.slippage_rate)
         with self.lock:
+            cash_before = float(self.cash)
             self.cash = round(max(0.0, self.cash - gross - cost), 2)
             self.positions.append(
                 {
@@ -1341,6 +1326,8 @@ class LiveTrader:
             actual_price = bar.close
         gross = actual_shares * actual_price
         cost = gross * (strategy.commission_rate + strategy.slippage_rate)
+        with self.lock:
+            self.cash = round(max(0.0, cash_before - gross - cost), 2)
         trade = ScannerTrade(
             timestamp=trade_timestamp or now,
             action="BUY",
@@ -1458,6 +1445,7 @@ class LiveTrader:
         remaining_shares = shares - order_shares
         action = "SELL_PARTIAL" if remaining_shares > 0 else "SELL_ALL"
         cash_before = self.cash
+        original_position = dict(position)
         with self.lock:
             self.cash = round(self.cash + gross - cost, 2)
             if remaining_shares > 0:
@@ -1478,10 +1466,27 @@ class LiveTrader:
                 cost = gross * (strategy.commission_rate + strategy.sell_tax_rate + strategy.slippage_rate)
                 realized_pnl = gross - cost - (entry_price * order_shares)
                 action = "SELL_PARTIAL" if actual_remaining > 0 else "SELL_ALL"
-            cash_diff = self.cash - cash_before
-            if abs(cash_diff) < 1.0 and self.cash <= cash_before:
-                # reconcile에서 실제 cash 갱신을 못한 경우 추정치 유지
-                pass
+                if actual_remaining > 0:
+                    with self.lock:
+                        existing = next(
+                            (pos for pos in self.positions if str(pos.get("symbol") or "") == symbol),
+                            None,
+                        )
+                        restored = existing or {
+                            "symbol": symbol,
+                            "entry_price": entry_price,
+                            "highest_price": max(
+                                float(original_position.get("highest_price") or entry_price),
+                                latest.close,
+                            ),
+                            "entry_time": original_position.get("entry_time", ""),
+                            "order_no": original_position.get("order_no", ""),
+                        }
+                        restored["shares"] = actual_remaining
+                        if not existing:
+                            self.positions.append(restored)
+        with self.lock:
+            self.cash = round(max(0.0, cash_before + gross - cost), 2)
         _ = order_meta
         trade = ScannerTrade(
             timestamp=trade_timestamp or now,
@@ -1543,10 +1548,11 @@ class LiveTrader:
             return None
         if latest.volume <= 0:
             return None
+        entry_edge = _entry_edge_rate(strategy)
         # 직전 봉 고점을 넘지 못하면 모멘텀 지속 신호로 보지 않는다.
         if len(current_bars) >= 2:
             prev_bar = current_bars[-2]
-            if latest.close <= prev_bar.high * (1.0 + (strategy.min_edge_rate * 0.5)):
+            if latest.close <= prev_bar.high * (1.0 + entry_edge):
                 return None
         previous_volumes = [float(bar.volume) for bar in current_bars[:-1] if bar.volume > 0]
         volume_avg = sum(previous_volumes[-strategy.volume_sma :]) / min(len(previous_volumes), strategy.volume_sma) if previous_volumes else 0.0
@@ -1566,7 +1572,7 @@ class LiveTrader:
         opening_cutoff = session_start + timedelta(minutes=strategy.observation_minutes)
         opening_bars = [bar for bar in current_bars if bar.timestamp < opening_cutoff]
         opening_high = max((bar.high for bar in opening_bars), default=latest.high)
-        opening_breakout = latest.close > opening_high * (1.0 + strategy.min_edge_rate)
+        opening_breakout = latest.close > opening_high * (1.0 + entry_edge)
         if profile.require_opening_breakout and not opening_breakout:
             return None
         breakout_bonus = 1.0 if opening_breakout else 0.0
@@ -1752,7 +1758,7 @@ class LiveTrader:
                 atr_period=min(self.strategy.atr_period, 4),
                 min_atr_pct=min(self.strategy.min_atr_pct, 0.0025),
                 max_atr_pct=max(self.strategy.max_atr_pct, 0.08),
-                min_edge_bps=min(self.strategy.min_edge_bps, 15.0),
+                min_edge_bps=max(self.strategy.min_edge_bps, DOMESTIC_LIVE_MIN_EDGE_BPS),
                 max_extension_pct=max(self.strategy.max_extension_pct, 0.07),
                 max_trades_per_day=min(self.strategy.max_trades_per_day, 3),
                 loss_cooldown_minutes=max(self.strategy.loss_cooldown_minutes, 60),
@@ -1909,7 +1915,7 @@ class LiveTrader:
         if profile.require_pullback_reclaim and not _has_recent_pullback_reclaim(current_bars):
             return "눌림 후 재돌파 대기"
 
-        edge = strategy.round_trip_cost_rate + strategy.min_edge_rate
+        edge = _entry_edge_rate(strategy)
         opening_cutoff = session_start + timedelta(minutes=strategy.observation_minutes)
         opening_bars = [bar for bar in current_bars if bar.timestamp < opening_cutoff]
         if not opening_bars:
@@ -1998,9 +2004,10 @@ class LiveTrader:
         side: str,
         now: datetime,
     ) -> dict[str, float] | None:
-        """주문 직후 잔고를 조회해 self.cash, position[shares]/entry_price를 실제 값으로 보정.
+        """주문 직후 잔고를 조회해 position[shares]/entry_price를 실제 값으로 보정.
 
-        주문 체결이 비동기일 수 있어 best-effort로 한 번만 시도한다. 실패 시 추정 값 유지.
+        주문 체결이 비동기일 수 있어 best-effort로 한 번만 시도한다. 국내 잔고의 현금성 필드는
+        당일 체결 직후 stale하게 들어올 수 있어 self.cash는 주문 가격 기반 추정값을 유지한다.
         """
         holding = self._query_balance_holding(client, symbol)
         if holding is None:
@@ -2031,8 +2038,6 @@ class LiveTrader:
                     self.positions = [p for p in self.positions if str(p.get("symbol") or "") != symbol]
                 elif position and actual_qty > 0:
                     position["shares"] = actual_qty
-            if actual_cash > 0:
-                self.cash = round(actual_cash, 2)
         self._log_decision(
             "fill_reconciled",
             now,
@@ -2040,7 +2045,8 @@ class LiveTrader:
             symbol=symbol,
             actual_qty=actual_qty,
             avg_price=avg_price,
-            cash=actual_cash,
+            broker_cash=actual_cash,
+            cash_after=self.cash,
         )
         return holding
 
@@ -2819,6 +2825,15 @@ def _position_held_minutes(position: dict[str, Any] | None, now: datetime) -> in
     return max(0, int((now - entered_at).total_seconds() // 60))
 
 
+def _position_held_seconds(position: dict[str, Any] | None, now: datetime) -> int | None:
+    if not position:
+        return None
+    entered_at = _timestamp_datetime(position.get("entry_time"))
+    if not entered_at:
+        return None
+    return max(0, int((now - entered_at).total_seconds()))
+
+
 def _position_in_bar(position: dict[str, Any] | None, bar: StockBar, bar_minutes: int) -> bool:
     entered_at = _timestamp_datetime((position or {}).get("entry_time"))
     if not entered_at:
@@ -2881,6 +2896,10 @@ def _live_order_shares(
     budget = min(cash, slot_cap, risk_cap, position_cap)
     cost_per_share = price * (1.0 + strategy.commission_rate + strategy.slippage_rate)
     return math.floor(budget / cost_per_share) if cost_per_share > 0 else 0
+
+
+def _entry_edge_rate(strategy: StockScannerConfig) -> float:
+    return strategy.round_trip_cost_rate + strategy.min_edge_rate
 
 
 def _latest_symbol_bar(bars: list[StockBar], symbol: str, session: object) -> StockBar | None:
